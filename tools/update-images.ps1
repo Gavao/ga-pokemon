@@ -1,4 +1,5 @@
-# Rigenera js/images.js: per ogni carta senza immagine italiana su TCGdex cerca un'alternativa, in ordine:
+# Rigenera js/images.js: per ogni carta senza immagine su TCGdex, o con un'immagine dichiarata che
+# sul server non esiste, cerca un'alternativa, in ordine:
 #   1. Limitless TCG, in italiano   2. TCGdex in inglese   3. Scrydex, in inglese   4. TCGdex in altre lingue
 #   5. foto prodotto di TCGplayer, in inglese
 # Da rilanciare quando escono nuovi set:  powershell -ExecutionPolicy Bypass -File tools\update-images.ps1
@@ -38,11 +39,50 @@ function Get-Images($lang, $setId) {
 $setIds = (Invoke-RestMethod "$api/it/series").id | Where-Object { $_ -ne 'tcgp' } |
   ForEach-Object { (Invoke-RestMethod "$api/it/series/$_").sets.id }
 
+# Controllo in parallelo di molti indirizzi: url -> $true se l'immagine c'è davvero.
+Add-Type -AssemblyName System.Net.Http
+$http = New-Object System.Net.Http.HttpClient
+$http.Timeout = [TimeSpan]::FromSeconds(40)
+$http.DefaultRequestHeaders.UserAgent.ParseAdd('Mozilla/5.0')
+function Test-Urls([string[]]$urls) {
+  $ok = @{}
+  foreach ($round in 1..2) {   # il secondo giro riprova quelli falliti: spesso sono errori di rete passeggeri
+    $todo = @($urls | Where-Object { -not $ok[$_] })
+    for ($i = 0; $i -lt $todo.Count; $i += 32) {
+      $batch = $todo[$i..([Math]::Min($i + 31, $todo.Count - 1))]
+      $tasks = foreach ($u in $batch) { $http.SendAsync((New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Head), $u)) }
+      try { [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]$tasks) } catch { }
+      for ($j = 0; $j -lt $batch.Count; $j++) {
+        $t = $tasks[$j]
+        $ok[$batch[$j]] = $t.Status -eq 'RanToCompletion' -and $t.Result.IsSuccessStatusCode
+      }
+    }
+  }
+  $ok
+}
+
+$setIds = (Invoke-RestMethod "$api/it/series").id | Where-Object { $_ -ne 'tcgp' } |
+  ForEach-Object { (Invoke-RestMethod "$api/it/series/$_").sets.id }
+
 $map = [ordered]@{}
 $report = @()
 foreach ($id in $setIds) {
+  # Stesso elenco che usa l'app (js/api.js, getSet): italiano, completato con l'inglese.
   $set = Invoke-RestMethod "$api/it/sets/$([uri]::EscapeDataString($id))"
-  $missing = @($set.cards | Where-Object { -not $_.image })
+  $en = Get-Images 'en' $id
+  $cards = @($set.cards)
+  if ($cards.Count -lt $set.cardCount.total) {
+    $itIds = @{}; foreach ($c in $cards) { $itIds[$c.id] = 1 }
+    try {
+      foreach ($c in (Invoke-RestMethod "$api/en/sets/$([uri]::EscapeDataString($id))").cards) { if (-not $itIds[$c.id]) { $cards += $c } }
+    } catch { }
+  }
+  foreach ($c in $cards) { if (-not $c.image -and $en[$c.localId]) { $c | Add-Member -Force image $en[$c.localId] } }
+
+  # Carte senza immagine, o con un'immagine dichiarata che sul server non c'è.
+  $primary = @($cards | Where-Object image | ForEach-Object { "$($_.image)/low.webp" })
+  $alive = if ($primary.Count) { Test-Urls $primary } else { @{} }
+  $missing = @($cards | Where-Object { -not $_.image -or -not $alive["$($_.image)/low.webp"] })
   if (-not $missing.Count) { continue }
 
   $code = $set.abbreviation.official
@@ -50,7 +90,6 @@ foreach ($id in $setIds) {
   # Collezione Classica del 30°, che su TCGdex ha la stessa sigla del set principale (immagini sbagliate).
   if ($code -match ':' -or $id -eq '30th-c') { $code = $null }
   $sid = if ($scrydexId[$id]) { $scrydexId[$id] } else { $id }
-  $en = Get-Images 'en' $id
   $others = $null
   $count = @{ it = 0; en = 0; altro = 0; nessuna = 0 }
   foreach ($c in $missing) {
@@ -60,7 +99,8 @@ foreach ($id in $setIds) {
       $candidate = "$limitless/$code/${code}_$($digits.PadLeft(3, '0'))_R_IT_SM.png"
       if (Test-Url $candidate) { $url = $candidate; $count.it++ }
     }
-    if (-not $url -and $en[$c.localId]) { $url = $en[$c.localId]; $count.en++ }
+    $enUrl = $en[$c.localId]
+    if (-not $url -and $enUrl -and $enUrl -ne $c.image -and (Test-Url "$enUrl/low.webp")) { $url = $enUrl; $count.en++ }
     if (-not $url) {
       $n = if ($c.localId -match '^\d+$') { [int]$c.localId } else { $c.localId }
       $len = Get-Length "$scrydex/$sid-$n/small"
@@ -68,7 +108,7 @@ foreach ($id in $setIds) {
     }
     if (-not $url) {
       if ($null -eq $others) { $others = 'fr', 'es', 'de', 'pt' | ForEach-Object { , (Get-Images $_ $id) } }
-      $url = $others | ForEach-Object { $_[$c.localId] } | Where-Object { $_ } | Select-Object -First 1
+      $url = $others | ForEach-Object { $_[$c.localId] } | Where-Object { $_ -and (Test-Url "$_/low.webp") } | Select-Object -First 1
       if ($url) { $count.altro++ }
     }
     if (-not $url) {
@@ -83,13 +123,14 @@ foreach ($id in $setIds) {
     }
     if ($url) { $map[$c.id] = $url } else { $count.nessuna++ }
   }
-  $report += "{0,-12} {1,-44} mancanti={2,-4} italiano={3,-4} inglese={4,-4} altre lingue={5,-3} nessuna={6}" -f `
-    $id, $set.name, $missing.Count, $count.it, $count.en, $count.altro, $count.nessuna
+  $report += "{0,-12} {1,-44} carte={2,-4} da sistemare={3,-4} italiano={4,-4} inglese={5,-4} altre lingue={6,-3} nessuna={7}" -f `
+    $id, $set.name, $cards.Count, $missing.Count, $count.it, $count.en, $count.altro, $count.nessuna
 }
 
 $lines = $map.GetEnumerator() | ForEach-Object { "  '$($_.Key)': '$($_.Value)'," }
 $js = @"
-// Generato da tools/update-images.ps1: immagini alternative per le carte senza immagine italiana su TCGdex.
+// Generato da tools/update-images.ps1: immagini alternative per le carte senza immagine su TCGdex
+// o con un'immagine dichiarata ma assente dal server.
 export const IMAGES = {
 $($lines -join "`n")
 };

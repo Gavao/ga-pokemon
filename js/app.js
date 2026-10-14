@@ -2,6 +2,7 @@ import { db } from './db.js';
 import { getCatalog, getSet, getCard, searchCards } from './api.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
+import { captureFromVideo, canvasFromFile, readCard, findCards, parseNumber } from './scan.js';
 
 // ---------------------------------------------------------------------------
 // Personalizzazioni rapide: cambia queste liste per adattare l'app.
@@ -49,6 +50,7 @@ const recValue = rec => rec.copies.reduce((a, c) => a + c.qty * unitPrice(rec, c
 
 function applyDetail(rec, d) {
   rec.rarity = d.rarity;
+  rec.category = d.category;
   rec.variants = d.variants;
   rec.setId ??= d.set?.id;
   const cm = d.pricing?.cardmarket;
@@ -155,17 +157,89 @@ function ownedBySet() {
 // ---------------------------------------------------------------------------
 // Immagine della carta: quella italiana di TCGdex, altrimenti l'alternativa da js/images.js.
 // Ogni fonte ha il suo formato di indirizzo. Limitless e TCGplayer non mandano gli header CORS,
-// quindi lì niente crossorigin.
+// quindi lì niente crossorigin. L'immagine non parte subito: la carica imageQueue (più sotto).
 function cardImg(id, image, size, cls = '') {
-  const src = image ?? IMAGES[id];
+  // IMAGES contiene solo carte senza immagine italiana o con l'immagine italiana rotta: vince lei.
+  const src = IMAGES[id] ?? image;
   if (!src) return '';
   const limitless = src.includes('limitlesstcg'), tcgplayer = src.includes('tcgplayer');
   const url = limitless ? (size === 'high' ? src.replace('_SM.png', '_LG.png') : src)
     : tcgplayer ? (size === 'high' ? src : src.replace('.com/', '.com/fit-in/437x437/'))
     : src.includes('scrydex') ? `${src}/${size === 'high' ? 'large' : 'small'}`
     : `${src}/${size}.webp`;
-  return `<img class="${cls}" ${limitless || tcgplayer ? '' : 'crossorigin="anonymous"'} loading="lazy" src="${esc(url)}" alt="">`;
+  // Riserva: se l'immagine italiana non arriva, la stessa carta dall'archivio inglese.
+  const alt = url.includes('assets.tcgdex.net/it/') ? url.replace('/it/', '/en/') : '';
+  return `<img class="${cls}" ${limitless || tcgplayer ? '' : 'crossorigin="anonymous"'}
+    data-src="${esc(url)}" ${alt ? `data-alt="${esc(alt)}"` : ''} alt="">`;
 }
+
+// Caricamento delle immagini delle carte. Aprendo un set ne servono centinaia: chiederle tutte
+// insieme fa rifiutare dal server parte delle richieste, e quelle carte restavano senza immagine.
+// Qui si caricano solo quelle vicine allo schermo, poche alla volta; se una fallisce si riprova a
+// intervalli crescenti, poi si passa alla versione inglese, e solo alla fine si mostra il nome.
+const imageQueue = (() => {
+  // 6 tentativi a 1, 2, 4… 32 secondi: quando il server è carico risponde "occupato" anche per un
+  // minuto, e passare subito all'inglese vorrebbe dire perdere l'immagine italiana che c'è.
+  const MAX_ACTIVE = 6, RETRIES = 6;
+  const waiting = [];
+  let active = 0;
+
+  const near = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      near.unobserve(e.target);
+      waiting.push(e.target);
+    }
+    pump();
+  }, { rootMargin: '800px 0px' });
+
+  function pump() {
+    while (active < MAX_ACTIVE && waiting.length) {
+      const img = waiting.shift();
+      if (img.isConnected) start(img);
+    }
+  }
+
+  function start(img) {
+    active++;
+    img.onload = () => {
+      img.onload = img.onerror = null;
+      active--;
+      pump();
+    };
+    img.onerror = () => {
+      img.onload = img.onerror = null;
+      active--;
+      const tries = +(img.dataset.tries ?? 0);
+      if (tries < RETRIES) {
+        img.dataset.tries = tries + 1;
+        setTimeout(() => { if (img.isConnected) { waiting.unshift(img); pump(); } }, 1000 * 2 ** tries);
+      } else if (img.dataset.alt) {
+        img.dataset.src = img.dataset.alt;
+        delete img.dataset.alt;
+        img.dataset.tries = 0;
+        waiting.unshift(img);
+      } else if (img.closest('.tile')) {
+        img.closest('.tile').classList.add('noimg');
+      } else {
+        img.style.visibility = 'hidden';
+      }
+      pump();
+    };
+    img.removeAttribute('src');
+    img.src = img.dataset.src;
+  }
+
+  // Ogni immagine nuova nella pagina entra in osservazione.
+  new MutationObserver(() => {
+    for (const img of document.querySelectorAll('img[data-src]:not([data-queued])')) {
+      img.dataset.queued = '';
+      near.observe(img);
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+
+  return { pending: () => waiting.length + active };
+})();
 
 function tile(b) {
   const rec = coll.get(b.id);
@@ -205,6 +279,8 @@ const failed = err => `<p class="empty">Impossibile caricare i dati.<br><small>$
 // ---------------------------------------------------------------------------
 let catalog = null, homeQuery = '', searchSeq = 0, searchTimer;
 const setNames = new Map();
+// Serie aperte dall'utente: valgono solo finché l'app resta aperta, all'avvio sono tutte chiuse.
+const openSeries = new Set();
 
 const setRow = (s, owned) => {
   const n = owned.get(s.id) ?? 0, tot = s.cardCount.total;
@@ -220,7 +296,8 @@ async function home() {
   catalog = await getCatalog();
   for (const serie of catalog) for (const s of serie.sets) setNames.set(s.id, s.name);
   const dirty = meta.get('dirty');
-  view.innerHTML = `<header class="top"><h1>GA Pokémon</h1></header>
+  view.innerHTML = `<header class="top"><h1>GA Pokémon</h1>
+      <button class="chip on" data-act="scan">Scansiona</button></header>
     <div id="updateSlot">${updateBanner()}</div>
     ${!native && coll.size && dirty >= BACKUP_REMINDER
       ? `<a class="warn" href="#/more">${dirty} modifiche non ancora salvate in un backup. Tocca per salvarle.</a>` : ''}
@@ -238,9 +315,9 @@ function renderHome() {
   const seq = ++searchSeq;
 
   if (!q) {
-    body.innerHTML = catalog.map((serie, i) => {
+    body.innerHTML = catalog.map(serie => {
       const started = serie.sets.filter(s => owned.get(s.id)).length;
-      return `<details class="serie" ${i === 0 || started ? 'open' : ''}>
+      return `<details class="serie" data-serie="${esc(serie.id)}" ${openSeries.has(serie.id) ? 'open' : ''}>
         <summary>${esc(serie.name)}<small>${started ? `${started}/` : ''}${serie.sets.length} set</small></summary>
         ${serie.sets.map(s => setRow(s, owned)).join('')}
       </details>`;
@@ -314,6 +391,58 @@ function renderGrid() {
   $('#grid').innerHTML = cards.map(tile).join('') || '<p class="empty">Nessuna carta.</p>';
 }
 
+// Rarità TCGdex in italiano, dalla più comune alla più pregiata (le sconosciute vanno in fondo).
+const RARITY_ORDER = ['Comune', 'Non comune', 'Rara', 'Olografica Rara', 'Rara Lucente', 'Rara doppia',
+  'Olografica Rara V', 'Olografica Rara VMAX', 'Olografica Rara VSTAR', 'rara ASSO TATTICO',
+  'Allenatore d\'arte completa', 'Rara illustrazione', 'Ultrarara', 'Shiny rare', 'Shiny rare V',
+  'Shiny rare VMAX', 'ultrarara cromatica', 'Rara Bianco e Nero', 'Segreto rara',
+  'Rara illustrazione speciale', 'Mega Attack Rare', 'Rara iper', 'Mega Iper Raro'];
+const rarityRank = r => RARITY_ORDER.indexOf(r);
+const rarityLabel = r => !r || r === 'Nessuna' ? 'Senza rarità' : r[0].toUpperCase() + r.slice(1);
+
+// Tipo di carta, dal nome: Charizard ex, Mewtwo EX, Pikachu V, Mega Lucario…
+function cardKind(rec) {
+  const words = (rec.name ?? '').split(/[\s-]+/);
+  const last = words.at(-1);
+  if (words[0] === 'Mega' || /^M$/.test(words[0])) return 'Mega';
+  const kinds = { ex: 'Pokémon-ex', EX: 'Pokémon-EX', GX: 'Pokémon-GX', V: 'Pokémon V', VMAX: 'Pokémon VMAX',
+    VSTAR: 'Pokémon VSTAR', BREAK: 'Pokémon BREAK', 'LV.X': 'Pokémon LV.X', Prime: 'Pokémon Prime' };
+  if (kinds[last]) return kinds[last];
+  if (rec.category === 'Allenatore') return 'Allenatore';
+  if (rec.category === 'Energia') return 'Energia';
+  return rec.category ? 'Pokémon base' : 'Da scoprire';
+}
+
+// Rarità e tipo arrivano dal dettaglio della carta: per le carte aggiunte senza connessione o
+// importate da un backup lo si scarica qui, poche alla volta, senza contarle come modifiche.
+const detailsTried = new Set();   // una sola volta per carta e per sessione, anche se offline
+async function fillDetails(recs, onProgress) {
+  const queue = recs.filter(r => r.category === undefined && !detailsTried.has(r.cardId));
+  if (!queue.length) return;
+  for (const r of queue) detailsTried.add(r.cardId);
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (let rec; (rec = queue.shift());) {
+      try {
+        applyDetail(rec, await getCard(rec.cardId));
+        await db.put('cards', rec);
+      } catch { /* offline: resterà "Da scoprire" */ }
+    }
+  }));
+  onProgress?.();
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+// Gruppo apribile di carte: riga con conteggi e valore, sotto le carte del gruppo.
+function group(label, recs, extra = '') {
+  const copies = recs.reduce((a, r) => a + qty(r), 0);
+  const value = recs.reduce((a, r) => a + recValue(r), 0);
+  return `<details class="group">
+    <summary><span>${esc(label)}</span><small>${plural(recs.length, 'carta', 'carte')} · ${plural(copies, 'copia', 'copie')}${extra}${value ? ' · ' + eur(value) : ''}</small></summary>
+    <div class="grid">${recs.sort((a, b) => recValue(b) - recValue(a)).map(r => tile(recBrief(r))).join('')}</div>
+  </details>`;
+}
+
 async function stats() {
   const recs = [...coll.values()].filter(qty);
   const copies = recs.reduce((a, r) => a + qty(r), 0);
@@ -334,6 +463,22 @@ async function stats() {
   const top = recs.map(r => ({ r, v: recValue(r) })).filter(x => x.v > 0)
     .sort((a, b) => b.v - a.v).slice(0, 12);
 
+  const groupBy = keyOf => {
+    const m = new Map();
+    for (const r of recs) for (const k of [].concat(keyOf(r))) m.set(k, [...(m.get(k) ?? []), r]);
+    return m;
+  };
+  const byRarity = [...groupBy(r => rarityLabel(r.rarity))]
+    .sort((a, b) => rarityRank(b[1][0].rarity) - rarityRank(a[1][0].rarity));
+  const byKind = [...groupBy(cardKind)].sort((a, b) => b[1].length - a[1].length);
+  // Per variante contano le copie: la stessa carta può esserci sia normale sia reverse.
+  const byVariant = Object.entries(VARIANTS).map(([k, label]) => {
+    const withVariant = recs.filter(r => r.copies.some(c => c.variant === k));
+    const n = withVariant.reduce((a, r) => a + r.copies.filter(c => c.variant === k).reduce((s, c) => s + c.qty, 0), 0);
+    return [label, withVariant, n];
+  }).filter(([, list]) => list.length);
+  const missingDetails = recs.filter(r => r.category === undefined && !detailsTried.has(r.cardId)).length;
+
   view.innerHTML = `<header class="top"><h1>Collezione</h1></header>
     <div class="kpis">
       <div><b>${eur(value)}</b><small>Valore stimato</small></div>
@@ -341,7 +486,14 @@ async function stats() {
       <div><b>${copies}</b><small>Copie totali</small></div>
       <div><b>${copies - recs.length}</b><small>Doppioni</small></div>
     </div>
-    ${recs.length ? '' : '<p class="empty">Non hai ancora aggiunto carte.<br>Apri un set e tocca + su una carta.</p>'}
+    ${recs.length ? `<p class="note">Valori: prezzo medio di vendita su Cardmarket (trend) per una copia
+      in buone condizioni. Sono indicativi: lingua, condizione e gradazione possono cambiarli molto.</p>`
+      : '<p class="empty">Non hai ancora aggiunto carte.<br>Apri un set e tocca + su una carta.</p>'}
+    ${top.length ? `<h2>Carte di maggior valore</h2><div class="grid">${top.map(x => tile(recBrief(x.r))).join('')}</div>` : ''}
+    ${missingDetails ? `<p class="note" id="detailsNote">Recupero rarità e tipo di ${missingDetails} carte…</p>` : ''}
+    ${byRarity.length ? `<h2>Per rarità</h2>${byRarity.map(([label, list]) => group(label, list)).join('')}` : ''}
+    ${byVariant.length ? `<h2>Per variante</h2>${byVariant.map(([label, list, n]) => group(label, list, ` · ${plural(n, 'copia', 'copie')} in questa variante`)).join('')}` : ''}
+    ${byKind.length ? `<h2>Per tipo di carta</h2>${byKind.map(([label, list]) => group(label, list)).join('')}` : ''}
     ${bySet.size ? `<h2>Per set</h2>` + [...bySet].sort((a, b) => b[1].value - a[1].value).map(([id, s]) => {
       const tot = names.get(id)?.cardCount.total;
       return `<a class="setrow" href="#/set/${encodeURIComponent(id)}">
@@ -349,8 +501,140 @@ async function stats() {
         <span class="info"><b>${esc(names.get(id)?.name ?? id)}</b>${bar(s.n, tot)}</span>
         <span class="count">${s.n}${tot ? '/' + tot : ''}<br>${eur(s.value)}</span>
       </a>`;
-    }).join('') : ''}
-    ${top.length ? `<h2>Carte di maggior valore</h2><div class="grid">${top.map(x => tile(recBrief(x.r))).join('')}</div>` : ''}`;
+    }).join('') : ''}`;
+
+  if (missingDetails) fillDetails(recs, () => { if (location.hash === '#/stats' && !sheet.open) stats(); });
+}
+
+// ---------------------------------------------------------------------------
+// Album: come sistemare fisicamente le carte
+// ---------------------------------------------------------------------------
+// Soglie di protezione, modificabili dalla pagina e ricordate sul dispositivo.
+const protection = {
+  get toploader() { return meta.get('tlEuro') || 10; },
+  get sleeve() { return meta.get('slEuro') || 1; },
+};
+// Rarità che meritano comunque la bustina / il toploader, a prescindere dal prezzo.
+const SLEEVE_RARITY = rarityRank('Rara illustrazione');
+const TOPLOADER_RARITY = rarityRank('Rara illustrazione speciale');
+
+// Dove tenere una carta: in base alla copia di valore più alto e alla rarità.
+function protectionOf(rec) {
+  const best = Math.max(0, ...rec.copies.map(c => unitPrice(rec, c.variant)));
+  const rank = rarityRank(rec.rarity);
+  if (best >= protection.toploader || rank >= TOPLOADER_RARITY) return 'toploader';
+  if (best >= protection.sleeve || rank >= SLEEVE_RARITY) return 'sleeve';
+  return 'album';
+}
+
+let albumSet = '', albumPockets = 9, albumGaps = true;
+
+async function album() {
+  const recs = [...coll.values()].filter(qty);
+  if (!recs.length) {
+    view.innerHTML = `<header class="top"><h1>Album</h1></header>
+      <p class="empty">Aggiungi qualche carta alla collezione:<br>qui ti aiuto a sistemarle.</p>`;
+    return;
+  }
+  const names = new Map();
+  try {
+    for (const serie of await getCatalog()) for (const s of serie.sets) names.set(s.id, s);
+  } catch { /* offline */ }
+  const owned = ownedBySet();
+  const sets = [...owned.keys()].sort((a, b) => (names.get(a)?.name ?? a).localeCompare(names.get(b)?.name ?? b));
+  if (!owned.has(albumSet)) albumSet = sets[0];
+
+  const tiers = { toploader: [], sleeve: [], album: [] };
+  for (const r of recs) tiers[protectionOf(r)].push(r);
+  const copiesOf = list => list.reduce((a, r) => a + qty(r), 0);
+  const doubles = recs.filter(r => qty(r) > 1);
+
+  const toComplete = sets.map(id => {
+    const tot = names.get(id)?.cardCount.total ?? 0;
+    return { id, n: owned.get(id), tot, pct: tot ? owned.get(id) / tot : 0 };
+  }).sort((a, b) => b.pct - a.pct);
+
+  view.innerHTML = `<header class="top"><h1>Album</h1></header>
+
+    <h2>Protezione consigliata</h2>
+    <p class="note">In base al valore della copia migliore e alla rarità. Il toploader (custodia rigida) va
+      sempre usato con la bustina dentro.</p>
+    ${group(`Toploader + bustina`, tiers.toploader, ` · ${copiesOf(tiers.toploader)} toploader`)}
+    ${group('Bustina (sleeve) nell\'album', tiers.sleeve, ` · ${plural(copiesOf(tiers.sleeve), 'bustina', 'bustine')}`)}
+    ${group('Album, senza bustina', tiers.album)}
+    <div class="settings">
+      <label>Toploader da <input type="number" min="1" step="1" data-setting="tlEuro" value="${protection.toploader}"> €</label>
+      <label>Bustina da <input type="number" min="0" step="0.5" data-setting="slEuro" value="${protection.sleeve}"> €</label>
+    </div>
+
+    <h2>Pagine dell'album</h2>
+    <p class="note">Le carte nell'ordine del set, pagina per pagina. I posti vuoti sono le carte che ti
+      mancano: lasciali liberi e, quando le trovi, sai già dove vanno.</p>
+    <div class="settings">
+      <select id="albumSet">${options(sets.map(id => [id, names.get(id)?.name ?? id]), albumSet)}</select>
+      <select id="albumPockets">${options([[4, '4 tasche (2×2)'], [9, '9 tasche (3×3)'], [12, '12 tasche (3×4)']], albumPockets)}</select>
+      <label><input type="checkbox" id="albumGaps" ${albumGaps ? 'checked' : ''}> Lascia i posti per le mancanti</label>
+    </div>
+    <div id="albumPages"><p class="note">Caricamento…</p></div>
+
+    <h2>Set da completare</h2>
+    ${toComplete.map(s => `<div class="setrow">
+      <span class="logo">${names.has(s.id) ? setLogo(names.get(s.id)) : ''}</span>
+      <span class="info"><a href="#/set/${encodeURIComponent(s.id)}"><b>${esc(names.get(s.id)?.name ?? s.id)}</b></a>
+        ${bar(s.n, s.tot)}<small data-cost="${esc(s.id)}">${s.tot - s.n === 1 ? 'manca 1 carta' : `mancano ${s.tot - s.n} carte`}</small></span>
+      <button class="chip" data-act="cost" data-set="${esc(s.id)}">Quanto costa?</button>
+    </div>`).join('')}
+
+    <h2>Doppioni</h2>
+    ${doubles.length ? group('Copie in più, da scambiare', doubles,
+      ` · ${copiesOf(doubles) - doubles.length} in più`) : '<p class="note">Nessun doppione.</p>'}`;
+
+  renderAlbumPages();
+}
+
+async function renderAlbumPages() {
+  const box = $('#albumPages');
+  if (!box || !albumSet) return;
+  let set;
+  try { set = await getSet(albumSet); } catch (err) { box.innerHTML = failed(err); return; }
+  for (const c of set.cards) briefs.set(c.id, { ...c, setId: set.id });
+  const cards = albumGaps ? set.cards : set.cards.filter(c => qty(coll.get(c.id)));
+  const cols = albumPockets === 4 ? 2 : 3;
+  const pages = [];
+  for (let i = 0; i < cards.length; i += albumPockets) pages.push(cards.slice(i, i + albumPockets));
+  box.innerHTML = pages.map((page, p) => `<div class="page">
+      <small>Pagina ${p + 1}${p % 2 ? ' (retro)' : ' (fronte)'} · ${page[0].localId}–${page.at(-1).localId}</small>
+      <div class="pockets" style="grid-template-columns:repeat(${cols},1fr)">
+        ${page.map(c => {
+          const rec = coll.get(c.id);
+          if (!qty(rec)) return `<div class="pocket empty" data-card="${esc(c.id)}"><b>${esc(c.localId)}</b><span>${esc(c.name)}</span></div>`;
+          const tier = protectionOf(rec);
+          return `<div class="pocket" data-card="${esc(c.id)}">${cardImg(c.id, c.image, 'low')}
+            ${tier === 'toploader' ? '<i class="tag">TL</i>' : tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
+        }).join('')}
+      </div>
+    </div>`).join('') + `<p class="note">TL = va nel toploader (puoi lasciare il posto libero o un segnaposto) ·
+      B = mettila nell'album dentro una bustina.</p>`;
+}
+
+// Stima del costo per completare un set: somma dei prezzi trend delle carte mancanti.
+async function completionCost(setId, label) {
+  const set = await getSet(setId);
+  const missing = set.cards.filter(c => !qty(coll.get(c.id)));
+  let total = 0, unpriced = 0, done = 0;
+  const queue = [...missing];
+  await Promise.all(Array.from({ length: 6 }, async () => {
+    for (let c; (c = queue.shift());) {
+      try {
+        const cm = (await getCard(c.id)).pricing?.cardmarket;
+        const price = cm && (cm.trend || cm.avg || cm['trend-holo'] || cm['avg-holo']);
+        if (price) total += price; else unpriced++;
+      } catch { unpriced++; }
+      label.textContent = `calcolo… ${++done}/${missing.length}`;
+    }
+  }));
+  label.textContent = (missing.length === 1 ? 'manca 1 carta' : `mancano ${missing.length} carte`) + ` · circa ${eur(total)}`
+    + (unpriced ? ` (${unpriced} senza prezzo)` : '');
 }
 
 function wish() {
@@ -467,7 +751,7 @@ function afterClose() {
   const id = cur.cardId;
   cur = null;
   const page = location.hash.replace(/^#\/?/, '').split('/')[0];
-  if (page === 'stats' || page === 'wish') route();
+  if (page === 'stats' || page === 'wish' || page === 'album') route();
   else refreshCard(id);
 }
 // L'evento "close" copre il tasto Indietro del telefono; può arrivare in ritardo, quindi
@@ -476,11 +760,119 @@ sheet.addEventListener('close', afterClose);
 
 // Chiamata dall'APK quando si preme Indietro: true = gestito qui (c'era la scheda carta aperta).
 window.appBack = () => {
-  if (!sheet.open) return false;
-  sheet.close();
-  afterClose();
-  return true;
+  if (sheet.open) {
+    sheet.close();
+    afterClose();
+    return true;
+  }
+  if (scanner.open) {
+    closeScanner();
+    return true;
+  }
+  return false;
 };
+
+// ---------------------------------------------------------------------------
+// Scansione di una carta con la fotocamera (riconoscimento in js/scan.js)
+// ---------------------------------------------------------------------------
+const scanner = $('#scanner');
+const scanVideo = scanner.querySelector('video');
+let scanStream = null;
+
+async function openScanner() {
+  $('#scanMsg').textContent = '';
+  $('#scanResults').innerHTML = '';
+  scanner.showModal();
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false,
+    });
+    scanVideo.srcObject = scanStream;
+    await scanVideo.play();
+    scanner.classList.remove('nocam');
+  } catch {
+    scanner.classList.add('nocam');
+    // Le versioni dell'APK prima della 1.2 non hanno il permesso per la fotocamera.
+    $('#scanMsg').textContent = apkUpdate
+      ? 'Per usare la fotocamera aggiorna l\'app (avviso nella schermata iniziale). Intanto puoi usare una foto della carta.'
+      : 'Fotocamera non disponibile o permesso negato: puoi usare una foto della carta.';
+  }
+}
+
+function stopCamera() {
+  scanStream?.getTracks().forEach(t => t.stop());
+  scanStream = null;
+}
+
+function closeScanner() {
+  stopCamera();
+  if (scanner.open) scanner.close();
+}
+
+let scanning = false, lastReading = null;
+async function recognize(card) {
+  if (scanning) return;
+  scanning = true;
+  const msg = $('#scanMsg');
+  $('#scanResults').innerHTML = '';
+  $('#scanFix').hidden = true;
+  try {
+    lastReading = await readCard(card, status => { msg.textContent = status; });
+    await showMatches(lastReading);
+  } catch (err) {
+    msg.textContent = err.message;
+  } finally {
+    scanning = false;
+  }
+}
+
+async function showMatches(reading) {
+  const msg = $('#scanMsg');
+  msg.textContent = 'Cerco nel catalogo…';
+  const found = await findCards(reading);
+  for (const c of found) briefs.set(c.id, c);
+  const n = reading.number;
+  const numberText = n ? `Ho letto il numero ${n.prefix}${n.num}${n.total ? '/' + n.total : ''}. ` : 'Non sono riuscito a leggere il numero. ';
+  msg.textContent = found.length
+    ? numberText + 'Tocca la carta giusta per aprirla, oppure + per aggiungerla subito.'
+    : numberText + 'Nessuna carta trovata: riprova con più luce e la carta dritta e ferma, o scrivi il numero qui sotto.';
+  $('#scanFix').hidden = false;
+  $('#scanNumber').value = '';
+  $('#scanResults').innerHTML = found.length ? `<div class="grid">${found.map(c =>
+    `<div class="result">${tile(c)}<small>${esc(c.setName)}</small></div>`).join('')}</div>` : '';
+}
+
+// Correzione a mano del numero letto male: stessa ricerca, con il nome letto dalla foto.
+$('#scanFix').addEventListener('submit', async e => {
+  e.preventDefault();
+  const number = parseNumber($('#scanNumber').value);
+  if (!number) {
+    $('#scanMsg').textContent = 'Scrivi il numero come sulla carta, es. 81/198 oppure TG12/TG30.';
+    return;
+  }
+  await showMatches({ number, nameText: lastReading?.nameText ?? '' });
+});
+
+scanner.addEventListener('click', e => {
+  if (e.target === scanner || e.target.closest('[data-close-scan]')) return closeScanner();
+  if (e.target.closest('[data-shot]')) {
+    if (!scanStream) return $('#scanFile').click();
+    return recognize(captureFromVideo(scanVideo, scanner.querySelector('.frame')));
+  }
+  const add = e.target.closest('[data-add]');
+  if (add) return quickAdd(add.dataset.add);
+  const card = e.target.closest('[data-card]');
+  if (card) openCard(card.dataset.card);   // la scheda si apre sopra: chiudendola si torna a scansionare
+});
+
+scanner.addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  if (e.target.id !== 'scanFile' || !file) return;
+  e.target.value = '';
+  recognize(await canvasFromFile(file));
+});
+
+scanner.addEventListener('close', stopCamera);
 
 function refreshCard(id) {
   const b = briefs.get(id);
@@ -596,6 +988,12 @@ view.addEventListener('click', async e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   const msg = $('#msg');
   if (act === 'prices') await refreshPrices(msg);
+  if (act === 'scan') openScanner();
+  if (act === 'cost') {
+    const btn = e.target.closest('[data-act]');
+    btn.remove();
+    await completionCost(btn.dataset.set, view.querySelector(`[data-cost="${CSS.escape(btn.dataset.set)}"]`));
+  }
   if (act === 'update') {
     const button = e.target.closest('[data-act]');
     button.removeAttribute('data-act');   // un solo download anche con più tocchi
@@ -632,22 +1030,25 @@ view.addEventListener('input', e => {
 });
 
 view.addEventListener('change', e => {
-  if (e.target.id === 'file' && e.target.files[0]) importBackup(e.target.files[0], $('#msg'));
+  const t = e.target;
+  if (t.id === 'file' && t.files[0]) importBackup(t.files[0], $('#msg'));
+  if (t.id === 'albumSet') { albumSet = t.value; renderAlbumPages(); }
+  if (t.id === 'albumPockets') { albumPockets = +t.value; renderAlbumPages(); }
+  if (t.id === 'albumGaps') { albumGaps = t.checked; renderAlbumPages(); }
+  if (t.dataset.setting && +t.value >= 0) { meta.set(t.dataset.setting, +t.value); album(); }
 });
 
-// Immagine non caricata: il server a volte rifiuta le richieste quando ne arrivano tante insieme,
-// quindi si riprova qualche volta; solo dopo si mostra il nome della carta.
+// Loghi dei set non caricati: si riprova qualche volta, poi si nasconde l'icona di immagine rotta.
+// (Le immagini delle carte hanno la loro coda, imageQueue.)
 document.addEventListener('error', e => {
   const img = e.target;
-  if (img.tagName !== 'IMG') return;
+  if (img.tagName !== 'IMG' || img.dataset.src !== undefined) return;
   const tries = +(img.dataset.tries ?? 0);
   if (tries < 3) {
     img.dataset.tries = tries + 1;
     setTimeout(() => { if (img.isConnected) img.src = img.src; }, 1500 * (tries + 1));
-  } else if (img.closest('.tile')) {
-    img.closest('.tile').classList.add('noimg');
   } else {
-    img.style.visibility = 'hidden';   // logo o immagine grande: niente icona di immagine rotta
+    img.style.visibility = 'hidden';
   }
 }, true);
 
@@ -662,6 +1063,7 @@ async function route() {
     if (page === 'set') await setView(decodeURIComponent(arg));
     else if (page === 'stats') await stats();
     else if (page === 'wish') wish();
+    else if (page === 'album') await album();
     else if (page === 'more') more();
     else await home();
   } catch (err) {
@@ -676,6 +1078,40 @@ addEventListener('hashchange', async e => {
   await route();
   scrollTo(0, scrollPos.get(location.hash) ?? 0);
 });
+
+// Apertura e chiusura delle serie ("toggle" non risale la pagina, quindi si ascolta in cattura).
+view.addEventListener('toggle', e => {
+  const id = e.target.dataset?.serie;
+  if (!id) return;
+  if (e.target.open) openSeries.add(id);
+  else openSeries.delete(id);
+}, true);
+
+// Se l'app resta in secondo piano più di qualche minuto, al ritorno riparte da capo come appena
+// aperta: schermata iniziale, serie chiuse, ricerca vuota. Le uscite brevi (fotocamera, scelta
+// di un file, un messaggio) invece non toccano nulla.
+const RESET_AFTER = 5 * 60 * 1000;
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    return;
+  }
+  if (!hiddenAt || Date.now() - hiddenAt < RESET_AFTER) return;
+  openSeries.clear();
+  scrollPos.clear();
+  homeQuery = '';
+  if (sheet.open) {
+    sheet.close();
+    afterClose();
+  }
+  if (location.hash === '#/') route();
+  else location.hash = '#/';
+  scrollTo(0, 0);
+});
+
+// All'avvio si parte sempre dalla schermata iniziale, anche se l'app era rimasta su un set.
+history.replaceState(null, '', location.pathname + location.search + '#/');
 
 for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 navigator.storage?.persist?.();

@@ -16,7 +16,10 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -45,9 +48,11 @@ public class MainActivity extends Activity {
     private static final String BACKUP_DIR = Environment.DIRECTORY_DOWNLOADS + "/GAPokemon";
     private static final String BACKUP_NAME = "ga-pokemon-backup.json";
     private static final int PICK_FILE = 1;
+    private static final int CAMERA_PERMISSION = 2;
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private PermissionRequest cameraRequest;   // richiesta della pagina in attesa del permesso Android
 
     @Override
     protected void onCreate(Bundle state) {
@@ -81,6 +86,23 @@ public class MainActivity extends Activity {
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
+            // Fotocamera per "Scansiona": la pagina la ottiene solo se anche Android ha dato il permesso.
+            @Override
+            public void onPermissionRequest(PermissionRequest request) {
+                runOnUiThread(() -> {
+                    boolean video = false;
+                    for (String r : request.getResources()) video |= PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r);
+                    if (!video || !HOST.equals(request.getOrigin().getHost())) {
+                        request.deny();
+                    } else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+                    } else {
+                        cameraRequest = request;
+                        requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION);
+                    }
+                });
+            }
+
             // <input type="file">: serve per "Ripristina da un backup".
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
@@ -106,6 +128,17 @@ public class MainActivity extends Activity {
         Uri picked = resultCode == RESULT_OK && data != null ? data.getData() : null;
         fileCallback.onReceiveValue(picked == null ? null : new Uri[]{picked});
         fileCallback = null;
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        if (requestCode != CAMERA_PERMISSION || cameraRequest == null) return;
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            cameraRequest.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+        } else {
+            cameraRequest.deny();
+        }
+        cameraRequest = null;
     }
 
     /** Tasto Indietro: prima chiude la scheda carta, poi torna alla pagina precedente, infine esce. */

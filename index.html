@@ -16,11 +16,33 @@
   <nav id="nav">
     <a href="#/" data-tab="home"><span>◓</span>Espansioni</a>
     <a href="#/stats" data-tab="stats"><span>▤</span>Collezione</a>
+    <a href="#/album" data-tab="album"><span>▦</span>Album</a>
     <a href="#/wish" data-tab="wish"><span>★</span>Wishlist</a>
     <a href="#/more" data-tab="more"><span>⚙</span>Altro</a>
   </nav>
 
   <dialog id="sheet"></dialog>
+
+  <dialog id="scanner">
+    <div class="sheet-head">
+      <div><h2>Scansiona una carta</h2><small>Carta dritta dentro il riquadro, con buona luce</small></div>
+      <button class="icon" data-close-scan aria-label="Chiudi">✕</button>
+    </div>
+    <div class="scan-view">
+      <video playsinline muted></video>
+      <div class="frame"></div>
+    </div>
+    <div class="scan-actions">
+      <button class="primary" data-shot>Scatta e riconosci</button>
+      <label class="chip">Usa una foto<input type="file" accept="image/*" id="scanFile" hidden></label>
+    </div>
+    <p class="note" id="scanMsg"></p>
+    <form id="scanFix" hidden>
+      <input id="scanNumber" inputmode="text" autocomplete="off" placeholder="Numero giusto, es. 81/198">
+      <button class="chip">Cerca</button>
+    </form>
+    <div id="scanResults"></div>
+  </dialog>
 
   <script type="module" src="js/app.js"></script>
 </body>
