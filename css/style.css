@@ -411,7 +411,21 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
   pointer-events: none;
   transition: opacity .2s, transform .2s;
 }
-#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+#toast .chip { margin-top: 6px; padding: 4px 12px; font-size: 12px; }
+.where-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.where-actions select {
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+}
+.album-head { display: flex; align-items: center; gap: 6px; margin-top: 18px; }
+.album-head h2 { flex: 1; margin: 0; }
+.album-head h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 4px; }
+.album-head .icon { width: 34px; height: 34px; font-size: 15px; }
+.album-head .icon:disabled { opacity: .3; }
 .setrow .info a { color: inherit; }
 
 .up { color: #5fd38d; }

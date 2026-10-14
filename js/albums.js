@@ -54,6 +54,16 @@ async function setSlots(album, setId, owned) {
  */
 export async function albumLayout(album, owned) {
   const totalSides = Math.floor(album.capacity / album.perSide);
+  // Album libero: le carte che ci metti tu, nell'ordine delle tasche (null = tasca libera).
+  if (album.kind === 'free') {
+    const slots = (album.cards ?? []).map(e => (e ? { card: { id: e.cardId, localId: e.localId, name: e.name, image: e.image }, setId: e.setId, variant: null } : null));
+    const used = Math.max(1, Math.ceil(slots.length / album.perSide));
+    return {
+      album, totalSides, usedSides: Math.ceil(slots.length / album.perSide),
+      overflow: Math.max(0, slots.length - totalSides * album.perSide),
+      rows: [{ setId: 'free', slots, start: 0, error: null, firstSide: 1, lastSide: used, fits: slots.length <= totalSides * album.perSide }],
+    };
+  }
   // Album Pokédex: un posto per ogni numero di Pokédex nell'intervallo scelto, tutto in una "riga".
   if (album.kind === 'dex') {
     const slots = Array.from({ length: album.to - album.from + 1 }, (_, i) => ({ dex: album.from + i }));
