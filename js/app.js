@@ -1086,12 +1086,12 @@ async function album() {
     <div class="settings"><button class="chip" data-box-act="new">+ Nuova scatola</button></div>
 
     <h2>Set da completare</h2>
-    ${toComplete.map(s => `<div class="setrow">
+    ${toComplete.slice(0, 3).map(s => `<a class="setrow" href="#/set/${encodeURIComponent(s.id)}">
       <span class="logo">${names.has(s.id) ? setLogo(names.get(s.id)) : ''}</span>
-      <span class="info"><a href="#/set/${encodeURIComponent(s.id)}"><b>${esc(setName(s.id))}</b></a>
-        ${bar(s.n, s.tot)}<small data-cost="${esc(s.id)}">${s.tot - s.n === 1 ? 'manca 1 carta' : `mancano ${s.tot - s.n} carte`}</small></span>
-      <button class="chip" data-act="cost" data-set="${esc(s.id)}">Quanto costa?</button>
-    </div>`).join('')}
+      <span class="info"><b>${esc(setName(s.id))}</b>${bar(s.n, s.tot)}
+        <small>${s.tot - s.n === 1 ? 'manca 1 carta' : `mancano ${s.tot - s.n} carte`}</small></span>
+    </a>`).join('')}
+    <div class="settings"><a class="chip on" href="#/complete">Consigli: costi, facilità e classifiche</a></div>
 
     <h2>Doppioni</h2>
     ${doublesCount() ? `<p class="note">${plural(doublesCount(), 'doppione', 'doppioni')}: copie in più della stessa versione.</p>
@@ -1267,6 +1267,130 @@ flip.addEventListener('click', e => {
   const card = e.target.closest('[data-card]');
   if (card) openCard(card.dataset.card);   // la scheda si apre sopra l'album
 });
+
+// ---------------------------------------------------------------------------
+// Set da completare: per ogni set di cui hai carte, cosa manca e quanto costa finirlo.
+// I prezzi delle mancanti si leggono una volta (Aggiorna i calcoli) e restano in "setAnalysis";
+// le carte che aggiungi dopo spariscono da sole dalle mancanti.
+// setGoals: per set, se lo segui (★), cosa vuol dire completo (tutte / solo numerate) e il budget.
+// ---------------------------------------------------------------------------
+let setAnalysis = {}, setGoals = {}, completeSort = 'near', onlyFollowed = false, analyzing = false;
+const CHEAP = 1;   // "economica": sotto 1 €
+
+// Carta numerata: numero semplice entro il totale stampato (le segrete hanno numero più alto o un prefisso).
+const isNumbered = (localId, official) => /^\d+$/.test(localId) && +localId <= official;
+
+async function analyzeSets(ids, msg) {
+  if (analyzing) return;
+  analyzing = true;
+  let done = 0;
+  for (const id of ids) {
+    try {
+      const set = await getSet(id);
+      const missing = set.cards.filter(c => !qty(coll.get(c.id)));
+      const queue = [...missing], out = [];
+      await Promise.all(Array.from({ length: 6 }, async () => {
+        for (let c; (c = queue.shift());) {
+          let price = null;
+          try { price = cardPrice(await getCard(c.id)) || null; } catch { /* resta senza prezzo */ }
+          out.push({ id: c.id, name: c.name, localId: c.localId, image: c.image, price });
+        }
+      }));
+      setAnalysis[id] = { date: new Date().toISOString().slice(0, 10), missing: out };
+      await db.put('settings', { key: 'setAnalysis', value: setAnalysis });
+    } catch { /* offline: si riprova la prossima volta */ }
+    if (msg) msg.textContent = `Calcolo… ${++done}/${ids.length} set`;
+  }
+  analyzing = false;
+}
+
+/** Numeri di un set secondo cosa vuol dire "completo" per te. */
+function setReport(id, set) {
+  const goal = setGoals[id] ?? {};
+  const official = set.cardCount.official || set.cardCount.total;
+  const numberedOnly = goal.scope === 'official';
+  const total = numberedOnly ? official : set.cardCount.total;
+  const owned = [...coll.values()].filter(r => r.setId === id && qty(r) && (!numberedOnly || isNumbered(r.localId, official))).length;
+  const a = setAnalysis[id];
+  const missing = a?.missing.filter(m => !qty(coll.get(m.id)) && (!numberedOnly || isNumbered(m.localId, official))) ?? null;
+  const cost = missing?.reduce((s, m) => s + (m.price ?? 0), 0) ?? null;
+  const missingN = Math.max(0, total - owned);
+  const pct = total ? owned / total : 0;
+  // Facilità 0–100: scende con il numero di mancanti e con quanto costano.
+  const ease = missing ? Math.round(100 * Math.exp(-(missingN / 40 + cost / 50))) : null;
+  // Miglior rapporto: euro da spendere per ogni 1% di completamento in più.
+  const perPoint = missing && missingN ? cost / (missingN / total * 100) : null;
+  const top = missing ? [...missing].filter(m => m.price).sort((x, y) => y.price - x.price).slice(0, 3) : [];
+  const cheap = missing?.filter(m => m.price != null && m.price < CHEAP).length ?? null;
+  // Budget: quante mancanti ci stanno, dalle più economiche.
+  let inBudget = null;
+  if (goal.budget && missing) {
+    let left = goal.budget;
+    inBudget = 0;
+    for (const m of missing.filter(x => x.price).sort((x, y) => x.price - y.price)) {
+      if (m.price > left) break;
+      left -= m.price;
+      inBudget++;
+    }
+  }
+  return { id, set, goal, total, owned, missingN, pct, cost, ease, perPoint, top, cheap, inBudget, analyzed: !!a, date: a?.date };
+}
+
+async function completePage() {
+  const names = await catalogNames();
+  for (const [id, s] of names) setNames.set(id, s.name);
+  const owned = ownedBySet();
+  const ids = [...new Set([...owned.keys(), ...Object.keys(setGoals).filter(id => setGoals[id].follow)])].filter(id => names.has(id));
+  let reports = ids.map(id => setReport(id, names.get(id))).filter(r => !onlyFollowed || r.goal.follow);
+  const sorters = {
+    near: (a, b) => b.pct - a.pct,
+    cheap: (a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity),
+    ratio: (a, b) => (a.perPoint ?? Infinity) - (b.perPoint ?? Infinity),
+    easy: (a, b) => (b.ease ?? -1) - (a.ease ?? -1),
+  };
+  reports.sort((a, b) => (b.goal.follow ? 1 : 0) - (a.goal.follow ? 1 : 0) || sorters[completeSort](a, b));
+  const missingAnalysis = ids.filter(id => !setAnalysis[id]);
+
+  view.innerHTML = `<header class="top"><a class="back" href="#/album" aria-label="Indietro">‹</a><h1>Set da completare</h1></header>
+    <div class="chips dup-chips">
+      ${[['near', 'Più vicini'], ['cheap', 'Più economici'], ['ratio', 'Miglior rapporto'], ['easy', 'Più facili']]
+        .map(([k, l]) => `<button class="chip ${completeSort === k ? 'on' : ''}" data-complete-sort="${k}">${l}</button>`).join('')}
+      <button class="chip ${onlyFollowed ? 'on' : ''}" data-complete-followed>★ Solo quelli che seguo</button>
+    </div>
+    <div class="settings"><button class="chip" data-act="analyze">${missingAnalysis.length ? `Calcola i costi (${plural(missingAnalysis.length, 'set', 'set')} da calcolare)` : 'Aggiorna i calcoli'}</button>
+      <small id="analyzeMsg"></small></div>
+    ${reports.map(r => `<div class="complete-row ${r.goal.follow ? 'followed' : ''}">
+      <div class="complete-head">
+        <span class="logo">${setLogo(r.set)}</span>
+        <a href="#/set/${encodeURIComponent(r.id)}"><b>${esc(r.set.name)}</b></a>
+        <button class="icon ${r.goal.follow ? 'on' : ''}" data-follow="${esc(r.id)}" aria-label="Segui questo set">★</button>
+      </div>
+      ${bar(r.owned, r.total)}
+      <small>${r.owned}/${r.total} (${Math.floor(r.pct * 100)}%) · ${r.missingN === 1 ? 'manca 1 carta' : `mancano ${r.missingN} carte`}</small>
+      ${r.analyzed ? `<div class="complete-stats">
+        <span><b>${eur(r.cost)}</b><small>per finirlo${r.missingN ? ` · ${eur(r.cost / r.missingN)} a carta` : ''}</small></span>
+        <span><b>${r.ease}</b><small>facilità su 100</small></span>
+        <span><b>${r.cheap}</b><small>mancanti sotto ${eur(CHEAP)}</small></span>
+        <span><b>${r.perPoint != null ? eur(r.perPoint) : '—'}</b><small>per ogni 1% in più</small></span>
+      </div>
+      ${r.top.length ? `<small class="top-missing">Le più care che mancano: ${r.top.map(m =>
+        `<a data-card="${esc(m.id)}">${esc(m.localId)} ${esc(m.name)} ${eur(m.price)}</a>`).join(' · ')}</small>` : ''}
+      ${r.goal.follow ? `<div class="settings"><label>Budget <input type="number" min="0" step="5" data-budget="${esc(r.id)}" value="${r.goal.budget ?? ''}"> €</label>
+        ${r.inBudget != null ? `<small>ci stanno ${plural(r.inBudget, 'carta', 'carte')} mancanti, partendo dalle più economiche</small>` : ''}</div>` : ''}
+      <small class="note">Prezzi calcolati il ${shortDate(r.date)}</small>` : '<small class="note">Costi non ancora calcolati.</small>'}
+      <div class="settings">
+        <select data-scope="${esc(r.id)}">${options([['all', 'Completo = tutte le carte'], ['official', 'Completo = solo le numerate']], r.goal.scope ?? 'all')}</select>
+        <button class="chip" data-shopping-set="${esc(r.id)}">Lista della spesa</button>
+      </div>
+    </div>`).join('') || '<p class="empty">Nessun set: aggiungi qualche carta o segui un set con ★.</p>'}`;
+  for (const r of reports) for (const m of r.top) briefs.set(m.id, { ...m, setId: r.id });
+}
+
+async function saveSetGoals() {
+  meta.set('dirty', meta.get('dirty') + 1);
+  await db.put('settings', { key: 'setGoals', value: setGoals });
+  autoBackup();
+}
 
 // Stima del costo per completare un set: somma dei prezzi trend delle carte mancanti.
 async function completionCost(setId, label) {
@@ -2170,7 +2294,7 @@ function afterClose() {
   const id = cur.cardId;
   cur = null;
   const page = location.hash.replace(/^#\/?/, '').split('/')[0];
-  if (['stats', 'wish', 'album', 'doubles'].includes(page)) route();
+  if (['stats', 'wish', 'album', 'doubles', 'complete'].includes(page)) route();
   else refreshCard(id);
 }
 // L'evento "close" copre il tasto Indietro del telefono; può arrivare in ritardo, quindi
@@ -2455,7 +2579,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals, storage });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals, storage, setGoals });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -2556,6 +2680,10 @@ async function importBackup(file, msg) {
       deals = data.deals;
       await db.put('settings', { key: 'deals', value: deals });
     }
+    if (data.setGoals && typeof data.setGoals === 'object') {   // set seguiti, budget, cosa vuol dire completo
+      setGoals = { ...setGoals, ...data.setGoals };
+      await db.put('settings', { key: 'setGoals', value: setGoals });
+    }
     if (data.storage?.boxes) {   // regole e scatole
       storage = { ...structuredClone(DEFAULT_STORAGE), ...data.storage };
       await db.put('settings', { key: 'storage', value: storage });
@@ -2633,6 +2761,25 @@ view.addEventListener('click', async e => {
     });
     await save(rec);
     return album();
+  }
+  const cSort = e.target.closest('[data-complete-sort]');
+  if (cSort) { completeSort = cSort.dataset.completeSort; return completePage(); }
+  if (e.target.closest('[data-complete-followed]')) { onlyFollowed = !onlyFollowed; return completePage(); }
+  const follow = e.target.closest('[data-follow]');
+  if (follow) {
+    const id = follow.dataset.follow;
+    setGoals[id] = { ...setGoals[id], follow: !setGoals[id]?.follow };
+    await saveSetGoals();
+    return completePage();
+  }
+  const shopSet = e.target.closest('[data-shopping-set]');
+  if (shopSet) return shareMissing(shopSet.dataset.shoppingSet);
+  if (e.target.closest('[data-act="analyze"]')) {
+    const names = await catalogNames();
+    const ids = [...new Set([...ownedBySet().keys(), ...Object.keys(setGoals).filter(id => setGoals[id].follow)])].filter(id => names.has(id));
+    const todo = ids.filter(id => !setAnalysis[id]);
+    await analyzeSets(todo.length ? todo : ids, $('#analyzeMsg'));
+    return completePage();
   }
   const dupSortBtn = e.target.closest('[data-dup-sort]');
   if (dupSortBtn) { dupSort = dupSortBtn.dataset.dupSort; return doublesPage(); }
@@ -2813,6 +2960,15 @@ view.addEventListener('change', e => {
     else if (+t.value > 0) cur[key] = Math.round(+t.value);
     persistAlbums().then(album);
   }
+  if (t.dataset.scope) {
+    setGoals[t.dataset.scope] = { ...setGoals[t.dataset.scope], scope: t.value };
+    saveSetGoals().then(completePage);
+  }
+  if (t.dataset.budget) {
+    const v = parseFloat(t.value);
+    setGoals[t.dataset.budget] = { ...setGoals[t.dataset.budget], budget: v > 0 ? v : null };
+    saveSetGoals().then(completePage);
+  }
   if (t.dataset.dupState) setDup(t.dataset.dupState, 'state', t.value).then(doublesPage);
   if (t.dataset.dupPrice) {
     const v = parseFloat(t.value.replace(',', '.'));
@@ -2860,7 +3016,7 @@ document.addEventListener('error', e => {
 // ---------------------------------------------------------------------------
 async function route() {
   const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' ? 'stats' : page || 'home';
+  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' ? 'stats' : page === 'complete' ? 'album' : page || 'home';
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab);
   try {
     if (page === 'set') await setView(decodeURIComponent(arg));
@@ -2869,6 +3025,7 @@ async function route() {
     else if (page === 'album') await album();
     else if (page === 'search') advancedSearch();
     else if (page === 'doubles') await doublesPage();
+    else if (page === 'complete') await completePage();
     else if (page === 'more') await more();
     else await home();
   } catch (err) {
@@ -2939,6 +3096,8 @@ valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
 packs = (await db.get('settings', 'packs'))?.value ?? [];
 goals = (await db.get('settings', 'goals'))?.value ?? [];
+setGoals = (await db.get('settings', 'setGoals'))?.value ?? {};
+setAnalysis = (await db.get('settings', 'setAnalysis'))?.value ?? {};
 // Regole e scatole; la prima volta si riprendono le soglie che c'erano prima.
 storage = { ...structuredClone(DEFAULT_STORAGE), ...(await db.get('settings', 'storage'))?.value };
 if (meta.get('tlEuro') && !(await db.get('settings', 'storage'))) storage.tl = meta.get('tlEuro');

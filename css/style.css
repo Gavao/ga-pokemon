@@ -541,6 +541,24 @@ body:has(#packbar:not([hidden])) #view { padding-bottom: calc(var(--nav-h) + env
 .deal-row .info { flex: 1; min-width: 0; }
 .deal-row small { display: block; }
 
+/* Set da completare */
+.complete-row { padding: 10px 12px; margin-bottom: 8px; background: var(--panel); border-radius: 12px; }
+.complete-row.followed { border: 1px solid var(--accent); }
+.complete-row > small { display: block; margin-top: 4px; }
+.complete-head { display: flex; align-items: center; gap: 10px; }
+.complete-head .logo { width: 56px; height: 30px; flex: none; display: grid; place-items: center; }
+.complete-head .logo img { max-width: 100%; max-height: 100%; }
+.complete-head a { flex: 1; min-width: 0; color: inherit; }
+.complete-head .icon { width: 34px; height: 34px; }
+.complete-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 8px 0 4px; }
+.complete-stats span { background: var(--bg); border-radius: 8px; padding: 6px; }
+.complete-stats b { display: block; font-size: 14px; }
+.complete-stats small { display: block; font-size: 10px; line-height: 1.2; }
+.top-missing { display: block; margin: 4px 0; }
+.top-missing a { color: var(--accent); cursor: pointer; }
+.complete-row .note { padding: 0; margin: 4px 0 0; font-size: 11px; }
+.complete-row .settings { margin: 6px 0 0; }
+
 /* Doppioni */
 .kpis a { display: block; background: var(--panel); border-radius: 12px; padding: 14px; }
 .kpis a b { display: block; font-size: 22px; }
