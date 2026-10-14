@@ -90,6 +90,31 @@ export async function searchCards(name) {
   return [...it, ...en.filter(c => !itIds.has(c.id)).map(c => ({ ...c, lang: 'en' }))];
 }
 
+// Varianti di ogni carta di un set (cardId -> ['normal', 'holo', 'reverse', 'firstEdition']), per gli
+// album "master set" che hanno un posto per ognuna. L'elenco del set non le riporta, quindi si leggono
+// le schede delle carte; il risultato vale un mese. Se qualche scheda non arriva non si salva nulla,
+// così alla prossima occasione si riprova invece di tenersi dati incompleti.
+export const MASTER_VARIANTS = ['normal', 'holo', 'reverse', 'firstEdition'];
+export function getSetVariants(setId, onProgress) {
+  return cached('variants:' + setId, async () => {
+    const set = await getSet(setId);
+    const out = {}, queue = [...set.cards];
+    let done = 0, failed = 0;
+    await Promise.all(Array.from({ length: 6 }, async () => {
+      for (let c; (c = queue.shift());) {
+        try {
+          const v = (await getCard(c.id)).variants ?? {};
+          const list = MASTER_VARIANTS.filter(k => v[k]);
+          out[c.id] = list.length ? list : ['normal'];
+        } catch { failed++; }
+        onProgress?.(++done, set.cards.length);
+      }
+    }));
+    if (failed) throw new Error(`Varianti non disponibili per ${failed} carte`);
+    return out;
+  }, 30 * DAY);
+}
+
 // Dettaglio carta: rarità, varianti disponibili e prezzi. force = ignora la cache.
 // Se la carta non esiste in italiano si usa la scheda inglese.
 export function getCard(id, force = false) {
