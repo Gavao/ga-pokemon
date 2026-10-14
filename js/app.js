@@ -305,6 +305,7 @@ async function home() {
       <button class="chip" data-act="pack">Bustina</button>
       <button class="chip on" data-act="scan">Scansiona</button></header>
     <div id="updateSlot">${updateBanner()}</div>
+    <div id="alertSlot">${alertBanner()}</div>
     ${!native && coll.size && dirty >= BACKUP_REMINDER
       ? `<a class="warn" href="#/more">${dirty} modifiche non ancora salvate in un backup. Tocca per salvarle.</a>` : ''}
     <div class="tools"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}"></div>
@@ -890,11 +891,49 @@ async function completionCost(setId, label) {
     + (unpriced ? ` (${unpriced} senza prezzo)` : '');
 }
 
+// ---------------------------------------------------------------------------
+// Avvisi di prezzo: per le carte in wishlist puoi indicare a quanto le compreresti. A ogni apertura
+// dell'app i loro prezzi si ricontrollano; quelle scese sotto compaiono in cima alla wishlist.
+// ---------------------------------------------------------------------------
+let priceAlerts = [];   // [{ rec, price }]
+const wishPrice = r => unitPrice(r, r.variants && !r.variants.normal ? 'holo' : 'normal');
+
+async function checkPriceAlerts() {
+  const recs = [...coll.values()].filter(r => r.wish && r.alert > 0);
+  const hits = [];
+  for (const r of recs) {
+    try {
+      applyDetail(r, await getCard(r.cardId));   // scheda al massimo di un giorno fa
+      await db.put('cards', r);
+    } catch { /* offline: si usa l'ultimo prezzo noto */ }
+    const price = wishPrice(r);
+    if (price && price <= r.alert) hits.push({ rec: r, price });
+  }
+  priceAlerts = hits;
+  const slot = $('#alertSlot');
+  if (slot) slot.innerHTML = alertBanner();
+}
+
+const alertBanner = () => priceAlerts.length
+  ? `<a class="warn" href="#/wish">${priceAlerts.length === 1
+    ? `${esc(priceAlerts[0].rec.name)}: ora ${eur(priceAlerts[0].price)}, sotto il tuo prezzo`
+    : `${priceAlerts.length} carte della wishlist sono scese sotto il tuo prezzo`}. Guarda la wishlist.</a>` : '';
+
+const wishCaption = r => {
+  const p = wishPrice(r);
+  return `<small>${p ? '~' + eur(p) : 'prezzo n.d.'}${r.alert ? ` · avviso a ${eur(r.alert)}` : ''}</small>`;
+};
+
 function wish() {
   const recs = [...coll.values()].filter(r => r.wish);
+  const below = new Set(priceAlerts.map(a => a.rec.cardId));
+  const under = recs.filter(r => below.has(r.cardId)), rest = recs.filter(r => !below.has(r.cardId));
+  const grid = list => `<div class="grid">${list.map(r => `<div class="result">${tile(recBrief(r))}${wishCaption(r)}</div>`).join('')}</div>`;
   view.innerHTML = `<header class="top"><h1>Wishlist</h1>
       ${recs.length ? '<button class="chip" data-act="shareWish">Condividi</button>' : ''}</header>` + (recs.length
-    ? `<div class="grid">${recs.map(r => tile(recBrief(r))).join('')}</div>`
+    ? `${under.length ? `<h2>Sotto il tuo prezzo</h2>${grid(under)}<h2>Le altre</h2>` : ''}${grid(rest)}
+       <p class="note">Apri una carta per indicare il prezzo a cui la compreresti: quando scende sotto, te lo
+         segnalo all'apertura dell'app.</p>`
     : '<p class="empty">Nessuna carta in wishlist.<br>Apri una carta e tocca ★.</p>');
 }
 
@@ -964,6 +1003,8 @@ function renderSheet() {
       ? [p.nonFoil && `${cur.variants && !cur.variants.normal ? 'Prezzo' : 'Normale'} ${eur(p.nonFoil)}`, p.foil && `Foil ${eur(p.foil)}`].filter(Boolean).join(' · ')
       : 'Prezzo non disponibile'}</p>
     <p class="where" id="where"></p>
+    ${cur.wish ? `<label class="alertline">Avvisami quando scende sotto
+      <input id="alertInput" inputmode="decimal" placeholder="€" value="${cur.alert ?? ''}"> €</label>` : ''}
     <h3>Le mie copie <span>${qty(cur)}</span></h3>
     ${cur.copies.map((c, i) => `<div class="copy" data-i="${i}">
       <select data-f="variant">${options(variantList.filter(([k]) =>
@@ -1283,6 +1324,13 @@ sheet.addEventListener('click', async e => {
 });
 
 sheet.addEventListener('change', async e => {
+  if (e.target.id === 'alertInput' && cur) {
+    const v = parseFloat(e.target.value.replace(',', '.'));
+    cur.alert = v > 0 ? v : null;
+    await save(cur);
+    checkPriceAlerts();
+    return;
+  }
   const f = e.target.dataset.f;
   if (!f || !cur) return;
   const value = e.target.value.trim();
@@ -1880,3 +1928,4 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { up
 route();
 checkApkUpdate();
 checkWebUpdate();
+checkPriceAlerts();

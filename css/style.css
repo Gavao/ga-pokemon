@@ -381,6 +381,15 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 .up { color: #5fd38d; }
 .down { color: var(--red); }
 
+.alertline { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.alertline input {
+  width: 80px;
+  padding: 7px 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
 /* Bustina aperta */
 #packbar {
   position: fixed;
