@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { getCatalog, getSet, getCard, searchCards, getSetVariants } from './api.js';
+import { getCatalog, getSet, getCard, searchCards, getSetVariants, filterCards } from './api.js';
 import { DEFAULT_ALBUM, loadAlbums, saveAlbums, albumLayout, spot, columns } from './albums.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
@@ -54,6 +54,10 @@ function applyDetail(rec, d) {
   rec.rarity = d.rarity;
   rec.category = d.category;
   rec.variants = d.variants;
+  rec.types = d.types ?? [];
+  rec.illustrator = d.illustrator ?? '';
+  rec.dexId = d.dexId ?? [];
+  rec.detailV = 2;   // dettagli completi (tipi, illustratore, Pokédex): servono alla ricerca avanzata
   rec.setId ??= d.set?.id;
   const cm = d.pricing?.cardmarket;
   rec.price = cm ? {
@@ -308,7 +312,8 @@ async function home() {
     <div id="alertSlot">${alertBanner()}</div>
     ${!native && coll.size && dirty >= BACKUP_REMINDER
       ? `<a class="warn" href="#/more">${dirty} modifiche non ancora salvate in un backup. Tocca per salvarle.</a>` : ''}
-    <div class="tools"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}"></div>
+    <div class="tools searchrow"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}">
+      <a class="chip" href="#/search">Filtri</a></div>
     <div id="homeBody"></div>`;
   renderHome();
   renderPackbar();   // ora i nomi dei set sono noti
@@ -425,7 +430,7 @@ function cardKind(rec) {
 // importate da un backup lo si scarica qui, poche alla volta, senza contarle come modifiche.
 const detailsTried = new Set();   // una sola volta per carta e per sessione, anche se offline
 async function fillDetails(recs, onProgress) {
-  const queue = recs.filter(r => r.category === undefined && !detailsTried.has(r.cardId));
+  const queue = recs.filter(r => r.detailV !== 2 && !detailsTried.has(r.cardId));
   if (!queue.length) return;
   for (const r of queue) detailsTried.add(r.cardId);
   await Promise.all(Array.from({ length: 4 }, async () => {
@@ -485,7 +490,7 @@ async function stats() {
     const n = withVariant.reduce((a, r) => a + r.copies.filter(c => c.variant === k).reduce((s, c) => s + c.qty, 0), 0);
     return [label, withVariant, n];
   }).filter(([, list]) => list.length);
-  const missingDetails = recs.filter(r => r.category === undefined && !detailsTried.has(r.cardId)).length;
+  const missingDetails = recs.filter(r => r.detailV !== 2 && !detailsTried.has(r.cardId)).length;
 
   // Speso contro valore, solo sulle copie di cui hai indicato il prezzo pagato.
   const paid = recs.flatMap(r => r.copies.filter(c => c.paid != null).map(c => ({ r, c })));
@@ -891,6 +896,96 @@ async function completionCost(setId, label) {
   label.textContent = (missing.length === 1 ? 'manca 1 carta' : `mancano ${missing.length} carte`) + ` · circa ${eur(total)}`
     + (unpriced ? ` (${unpriced} senza prezzo)` : '');
 }
+
+// ---------------------------------------------------------------------------
+// Ricerca avanzata: nome, tipo, rarità, illustratore, categoria e prezzo, nel catalogo o nella
+// collezione. Il catalogo filtra lato TCGdex; la collezione si filtra qui.
+// ---------------------------------------------------------------------------
+const TYPES = ['Erba', 'Fuoco', 'Acqua', 'Lampo', 'Psico', 'Lotta', 'Oscurità', 'Metallo', 'Folletto', 'Drago', 'Incolore'];
+let adv = { name: '', types: '', rarity: '', illustrator: '', category: '', scope: 'all', min: '', max: '' };
+let advSeq = 0;
+
+function advancedSearch() {
+  view.innerHTML = `<header class="top"><a class="back" href="#/" aria-label="Indietro">‹</a><h1>Ricerca avanzata</h1></header>
+    <form id="advForm" class="advform">
+      <input id="advName" type="search" placeholder="Nome (es. Pikachu)" value="${esc(adv.name)}">
+      <select id="advTypes"><option value="">Tutti i tipi</option>${options(TYPES.map(t => [t, t]), adv.types)}</select>
+      <select id="advRarity"><option value="">Tutte le rarità</option>${options([...RARITY_ORDER].reverse().map(r => [r, rarityLabel(r)]), adv.rarity)}</select>
+      <select id="advCategory"><option value="">Pokémon, Allenatori, Energie</option>${options([['Pokémon', 'Solo Pokémon'], ['Allenatore', 'Solo Allenatori'], ['Energia', 'Solo Energie']], adv.category)}</select>
+      <input id="advIllustrator" placeholder="Illustratore (es. Mitsuhiro Arita)" value="${esc(adv.illustrator)}">
+      <div class="advprice"><input id="advMin" inputmode="decimal" placeholder="Prezzo da €" value="${esc(adv.min)}">
+        <input id="advMax" inputmode="decimal" placeholder="a €" value="${esc(adv.max)}"></div>
+      <select id="advScope">${options([['all', 'In tutto il catalogo'], ['missing', 'Solo quelle che mi mancano'], ['mine', 'Solo nella mia collezione']], adv.scope)}</select>
+      <button class="primary">Cerca</button>
+    </form>
+    <div id="advResults"></div>`;
+}
+
+const normText = s => (s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+async function runAdvanced() {
+  adv = {
+    name: $('#advName').value.trim(), types: $('#advTypes').value, rarity: $('#advRarity').value,
+    illustrator: $('#advIllustrator').value.trim(), category: $('#advCategory').value,
+    scope: $('#advScope').value, min: $('#advMin').value.trim(), max: $('#advMax').value.trim(),
+  };
+  const out = $('#advResults'), seq = ++advSeq;
+  const min = parseFloat(adv.min.replace(',', '.')) || 0, max = parseFloat(adv.max.replace(',', '.')) || Infinity;
+  const priced = min > 0 || max < Infinity;
+  const names = await catalogNames();
+  let found = [];
+
+  if (adv.scope === 'mine') {
+    const recs = [...coll.values()].filter(qty);
+    out.innerHTML = '<p class="note">Recupero i dettagli delle tue carte…</p>';
+    await fillDetails(recs);
+    found = recs.filter(r => (!adv.name || normText(r.name).includes(normText(adv.name)))
+      && (!adv.types || r.types?.includes(adv.types))
+      && (!adv.rarity || r.rarity === adv.rarity)
+      && (!adv.category || r.category === adv.category)
+      && (!adv.illustrator || normText(r.illustrator).includes(normText(adv.illustrator))))
+      .map(r => ({ ...recBrief(r), price: Math.max(...r.copies.map(c => unitPrice(r, c.variant))) }));
+  } else {
+    if (!adv.name && !adv.types && !adv.rarity && !adv.illustrator && !adv.category) {
+      out.innerHTML = '<p class="note">Scegli almeno un filtro oltre al prezzo.</p>';
+      return;
+    }
+    out.innerHTML = '<p class="note">Cerco nel catalogo…</p>';
+    try {
+      found = (await filterCards({ name: adv.name, types: adv.types, rarity: adv.rarity, illustrator: adv.illustrator, category: adv.category }))
+        .map(c => ({ ...c, setId: c.id.slice(0, c.id.lastIndexOf('-')) }))
+        .filter(c => names.has(c.setId) && (adv.scope !== 'missing' || !qty(coll.get(c.id))));
+    } catch {
+      out.innerHTML = '<p class="note">Per cercare nel catalogo serve la connessione.</p>';
+      return;
+    }
+    if (priced) {   // il prezzo non è nei risultati: si legge dalle schede (al massimo 120 carte)
+      found = found.slice(0, 120);
+      const queue = [...found];
+      let done = 0;
+      await Promise.all(Array.from({ length: 6 }, async () => {
+        for (let c; (c = queue.shift());) {
+          try { c.price = cardPrice(await getCard(c.id)); } catch { c.price = 0; }
+          if (seq === advSeq) out.innerHTML = `<p class="note">Controllo i prezzi… ${++done}/${found.length}</p>`;
+        }
+      }));
+    }
+  }
+  if (seq !== advSeq) return;
+  if (priced) found = found.filter(c => c.price >= min && c.price <= max);
+  for (const c of found) briefs.set(c.id, c);
+  const shown = found.slice(0, 200);
+  out.innerHTML = found.length
+    ? `<p class="note">${plural(found.length, 'carta trovata', 'carte trovate')}${found.length > shown.length ? `, mostrate le prime ${shown.length}` : ''}.</p>
+       <div class="grid">${shown.map(c => `<div class="result">${tile(c)}<small>${esc(names.get(c.setId)?.name ?? c.setId)}${c.price ? ' · ' + eur(c.price) : ''}</small></div>`).join('')}</div>`
+    : '<p class="note">Nessuna carta con questi filtri.</p>';
+}
+
+view.addEventListener('submit', e => {
+  if (e.target.id !== 'advForm') return;
+  e.preventDefault();
+  runAdvanced();
+});
 
 // ---------------------------------------------------------------------------
 // Obiettivi (scelti da te) e traguardi (automatici). Obiettivi e traguardi raggiunti stanno nel
@@ -1977,6 +2072,7 @@ async function route() {
     else if (page === 'stats') await stats();
     else if (page === 'wish') wish();
     else if (page === 'album') await album();
+    else if (page === 'search') advancedSearch();
     else if (page === 'more') more();
     else await home();
   } catch (err) {

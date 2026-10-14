@@ -115,6 +115,14 @@ export function getSetVariants(setId, onProgress) {
   }, 30 * DAY);
 }
 
+// Ricerca nel catalogo con filtri (nome, tipo, rarità, illustratore, categoria): TCGdex li accetta
+// come parametri. Al massimo 250 risultati.
+export function filterCards(filters) {
+  const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v));
+  qs.set('pagination:itemsPerPage', '250');
+  return json('/cards?' + qs);
+}
+
 // Dettaglio carta: rarità, varianti disponibili e prezzi. force = ignora la cache.
 // Se la carta non esiste in italiano si usa la scheda inglese.
 export function getCard(id, force = false) {

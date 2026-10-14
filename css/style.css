@@ -390,6 +390,19 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
   border-radius: 8px;
 }
 
+/* Ricerca avanzata */
+.searchrow { grid-template-columns: 1fr auto; align-items: center; }
+.advform { display: grid; gap: 8px; margin-bottom: 14px; }
+.advform input, .advform select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.advprice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
 /* Obiettivi e traguardi */
 .goal { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-bottom: 6px; background: var(--panel); border-radius: 12px; }
 .goal .info { flex: 1; min-width: 0; }
