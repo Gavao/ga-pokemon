@@ -1588,6 +1588,7 @@ drawer.addEventListener('click', e => {
   }
 });
 $('#drawerBackdrop').addEventListener('click', closeDrawer);
+$('#nav').addEventListener('click', e => { if (e.target.closest('[data-nav-scan]')) openScanner(); });
 
 // Ogni pagina ha il pulsante ☰ all'inizio della sua intestazione.
 new MutationObserver(() => {

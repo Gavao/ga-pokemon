@@ -710,6 +710,20 @@ h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
 #nav a { flex: 1; display: grid; place-content: center; justify-items: center; font-size: 11px; color: var(--muted); }
 #nav a span { font-size: 19px; line-height: 1.2; }
 #nav a.on { color: var(--accent); }
+/* Scansiona al centro della barra: il pulsante giallo in evidenza */
+#nav .nav-scan { flex: 1; display: grid; place-content: center; justify-items: center; padding: 0; background: none; border: 0; color: var(--text); font-size: 11px; }
+#nav .nav-scan span {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  margin-top: -18px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 22px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .5);
+}
 
 /* Scheda carta */
 #sheet {
