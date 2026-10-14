@@ -351,6 +351,42 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 .pocket.tl b { color: var(--text); font-size: 11px; }
 .pocket.todo { outline: 2px dashed var(--accent); outline-offset: -2px; }
 
+/* Sfoglia l'album */
+#flip {
+  width: 100%;
+  max-width: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  padding: calc(env(safe-area-inset-top) + 10px) 0 env(safe-area-inset-bottom);
+  border: 0;
+  background: #0d0f14;
+  color: var(--text);
+}
+#flip::backdrop { background: #000; }
+.flip-head { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; }
+.flip-head > div { flex: 1; min-width: 0; }
+.flip-head h2 { margin: 0; font-size: 17px; color: var(--text); text-transform: none; letter-spacing: 0; }
+.flip-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  height: calc(100% - 64px);
+}
+.flip-track::-webkit-scrollbar { display: none; }
+.flip-page {
+  flex: 0 0 100%;
+  scroll-snap-align: start;
+  display: grid;
+  align-content: center;
+  padding: 0 10px;
+}
+.flip-page .spread-sides { gap: 6px; }
+.flip-page .side { background: var(--panel); border-radius: 8px; padding: 6px; }
+.flip-page .side.blank { visibility: hidden; }
+.flip-page .pockets { gap: 4px; }
+
 /* Scheda carta: dove va */
 .where { margin: 0 0 8px; padding: 8px 10px; background: var(--panel); border-radius: 10px; font-size: 13px; color: var(--accent); }
 .where:empty { display: none; }

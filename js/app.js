@@ -795,7 +795,8 @@ async function album() {
     <p class="note">Come le vedi aprendo l'album: a sinistra il retro di un foglio, a destra il fronte del
       successivo. I posti vuoti sono le carte che ti mancano; quelli tratteggiati in giallo le carte ancora
       da sistemare; TL le carte nel toploader (lascia il posto libero o un segnaposto).</p>
-    <div class="settings"><select id="albumSet">${options(cur.sets.map(id => [id, setName(id)]), albumSet)}</select></div>
+    <div class="settings"><select id="albumSet">${options(cur.sets.map(id => [id, setName(id)]), albumSet)}</select>
+      <button class="chip on" data-act="flip">Sfoglia l'album</button></div>
     <div id="albumPages"></div>` : ''}
 
     <h2>Protezione consigliata</h2>
@@ -846,36 +847,95 @@ function renderSpreads(album, row) {
   const spreads = [...new Set([...sides.keys()].map(side => Math.floor(side / 2)))];
   const cols = columns(album.perSide);
 
-  const pocket = s => {
-    if (!s) return '<div class="pocket other"><span>altro set</span></div>';
-    const rec = coll.get(s.card.id);
-    const tag = VARIANT_TAG[s.variant] ? `<i class="vtag">${VARIANT_TAG[s.variant]}</i>` : '';
-    if (!ownsVariant(s.card.id, s.variant)) {
-      return `<div class="pocket empty" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>${esc(s.card.name)}</span>${tag}</div>`;
-    }
-    const tier = protectionOf(rec);
-    if (tier === 'toploader') {
-      return `<div class="pocket tl" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>nel toploader</span><i class="tag">TL</i></div>`;
-    }
-    const variant = s.variant ?? bestCopy(rec).variant;
-    const todo = !(rec.placed ?? []).includes(`${album.id}:${s.slot}:${variant}`);
-    return `<div class="pocket ${todo ? 'todo' : ''}" data-card="${esc(s.card.id)}">${cardImg(s.card.id, s.card.image, 'low')}
-      ${tag}${tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
-  };
+  const pocket = s => albumPocket(album, s, 'altro set');
   const side = n => {
     if (n < 1) return '<div class="side blank"></div>';
     if (!sides.has(n)) return `<div class="side other"><small>Facciata ${n}</small><p>altro set</p></div>`;
     return `<div class="side"><small>Facciata ${n}</small>
       <div class="pockets" style="grid-template-columns:repeat(${cols},1fr)">${sides.get(n).map(pocket).join('')}</div></div>`;
   };
-  box.innerHTML = spreads.map(k => {
-    const left = 2 * k, right = 2 * k + 1;
-    const label = k === 0 ? 'Prima pagina (fronte del foglio 1)'
-      : `Retro del foglio ${k} e fronte del foglio ${k + 1}`;
-    return `<div class="spread"><small class="spread-label">${label}</small>
-      <div class="spread-sides">${side(left)}${side(right)}</div></div>`;
-  }).join('');
+  box.innerHTML = spreads.map(k => `<div class="spread"><small class="spread-label">${spreadLabel(k)}</small>
+      <div class="spread-sides">${side(2 * k)}${side(2 * k + 1)}</div></div>`).join('');
 }
+
+const spreadLabel = k => (k === 0 ? 'Prima pagina (fronte del foglio 1)' : `Retro del foglio ${k} e fronte del foglio ${k + 1}`);
+
+/** Una tasca dell'album: carta (con TL/B e variante), posto vuoto della mancante o tasca libera. */
+function albumPocket(album, s, freeLabel) {
+  if (!s) return `<div class="pocket other"><span>${freeLabel}</span></div>`;
+  const rec = coll.get(s.card.id);
+  const tag = VARIANT_TAG[s.variant] ? `<i class="vtag">${VARIANT_TAG[s.variant]}</i>` : '';
+  if (!ownsVariant(s.card.id, s.variant)) {
+    return `<div class="pocket empty" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>${esc(s.card.name)}</span>${tag}</div>`;
+  }
+  const tier = protectionOf(rec);
+  if (tier === 'toploader') {
+    return `<div class="pocket tl" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>nel toploader</span><i class="tag">TL</i></div>`;
+  }
+  const variant = s.variant ?? bestCopy(rec).variant;
+  const todo = !(rec.placed ?? []).includes(`${album.id}:${s.slot}:${variant}`);
+  return `<div class="pocket ${todo ? 'todo' : ''}" data-card="${esc(s.card.id)}">${cardImg(s.card.id, s.card.image, 'low')}
+    ${tag}${tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Sfoglia l'album: tutte le doppie pagine a schermo intero, da scorrere col dito.
+// ---------------------------------------------------------------------------
+const flip = $('#flip');
+
+async function openFlip(startSet) {
+  const album = albums.find(a => a.id === currentAlbum) ?? albums[0];
+  const layout = await layoutFor(album);
+  const slots = new Map();   // posto nell'album -> carta
+  for (const row of layout.rows) {
+    if (!row.fits) continue;
+    row.slots.forEach((s, i) => {
+      slots.set(row.start + i, { ...s, slot: row.start + i });
+      briefs.set(s.card.id, { ...s.card, setId: row.setId });
+    });
+  }
+  const lastSide = Math.max(1, Math.min(layout.usedSides, layout.totalSides));
+  const cols = columns(album.perSide);
+  const side = n => {
+    if (n < 1 || n > layout.totalSides) return '<div class="side blank"></div>';
+    const from = (n - 1) * album.perSide;
+    const pockets = Array.from({ length: album.perSide }, (_, i) => albumPocket(album, slots.get(from + i), 'libera'));
+    return `<div class="side"><small>Facciata ${n}</small>
+      <div class="pockets" style="grid-template-columns:repeat(${cols},1fr)">${pockets.join('')}</div></div>`;
+  };
+  const spreads = Array.from({ length: Math.floor(lastSide / 2) + 1 }, (_, k) => k);
+  flip.innerHTML = `<div class="flip-head">
+      <div><h2>${esc(album.name)}</h2><small id="flipLabel"></small></div>
+      <button class="icon" data-flip="-1" aria-label="Pagina precedente">‹</button>
+      <button class="icon" data-flip="1" aria-label="Pagina successiva">›</button>
+      <button class="icon" data-close-flip aria-label="Chiudi">✕</button>
+    </div>
+    <div class="flip-track">${spreads.map(k => `<section class="flip-page" data-k="${k}">
+      <div class="spread-sides">${side(2 * k)}${side(2 * k + 1)}</div></section>`).join('')}</div>`;
+  flip.showModal();
+  const track = flip.querySelector('.flip-track');
+  const label = () => {
+    const k = Math.round(track.scrollLeft / track.clientWidth);
+    $('#flipLabel').textContent = `${spreadLabel(k)} · ${k + 1} di ${spreads.length}`;
+  };
+  track.addEventListener('scroll', label, { passive: true });
+  // Si apre sulla prima doppia pagina del set che stavi guardando.
+  const row = layout.rows.find(r => r.setId === startSet && r.fits);
+  if (row) track.scrollLeft = Math.floor(row.firstSide / 2) * track.clientWidth;
+  label();
+}
+
+flip.addEventListener('click', e => {
+  if (e.target === flip || e.target.closest('[data-close-flip]')) return flip.close();
+  const step = e.target.closest('[data-flip]');
+  if (step) {
+    const track = flip.querySelector('.flip-track');
+    track.scrollBy({ left: +step.dataset.flip * track.clientWidth, behavior: 'smooth' });
+    return;
+  }
+  const card = e.target.closest('[data-card]');
+  if (card) openCard(card.dataset.card);   // la scheda si apre sopra l'album
+});
 
 // Stima del costo per completare un set: somma dei prezzi trend delle carte mancanti.
 async function completionCost(setId, label) {
@@ -1568,6 +1628,12 @@ window.appBack = () => {
     closeScanner();
     return true;
   }
+  for (const d of [flip, $('#packDialog')]) {
+    if (d.open) {
+      d.close();
+      return true;
+    }
+  }
   return false;
 };
 
@@ -1986,6 +2052,7 @@ view.addEventListener('click', async e => {
     return stats();
   }
   if (act === 'pack') openPackDialog();
+  if (act === 'flip') openFlip(albumSet);
   if (act === 'shareWish') shareWishlist();
   if (act === 'shopping' && curSet) shareMissing(curSet.id);
   if (act === 'cost') {
