@@ -167,19 +167,27 @@ function ownedBySet() {
 // Immagine della carta: quella italiana di TCGdex, altrimenti l'alternativa da js/images.js.
 // Ogni fonte ha il suo formato di indirizzo. Limitless e TCGplayer non mandano gli header CORS,
 // quindi lì niente crossorigin. L'immagine non parte subito: la carica imageQueue (più sotto).
-function cardImg(id, image, size, cls = '') {
+/** Indirizzo dell'immagine di una carta nella misura voluta ('low' o 'high'); cors = si può salvare offline. */
+function cardImageUrl(id, image, size) {
   // IMAGES contiene solo carte senza immagine italiana o con l'immagine italiana rotta: vince lei.
   const src = IMAGES[id] ?? image;
-  if (!src) return '';
+  if (!src) return null;
   const limitless = src.includes('limitlesstcg'), tcgplayer = src.includes('tcgplayer');
-  const url = limitless ? (size === 'high' ? src.replace('_SM.png', '_LG.png') : src)
+  const url = src.startsWith('img/') ? src   // copia dentro l'app (tools/mirror-images.ps1): una sola misura
+    : limitless ? (size === 'high' ? src.replace('_SM.png', '_LG.png') : src)
     : tcgplayer ? (size === 'high' ? src : src.replace('.com/', '.com/fit-in/437x437/'))
     : src.includes('scrydex') ? `${src}/${size === 'high' ? 'large' : 'small'}`
     : `${src}/${size}.webp`;
+  return { url, cors: !limitless && !tcgplayer };
+}
+
+function cardImg(id, image, size, cls = '') {
+  const img = cardImageUrl(id, image, size);
+  if (!img) return '';
   // Riserva: se l'immagine italiana non arriva, la stessa carta dall'archivio inglese.
-  const alt = url.includes('assets.tcgdex.net/it/') ? url.replace('/it/', '/en/') : '';
-  return `<img class="${cls}" ${limitless || tcgplayer ? '' : 'crossorigin="anonymous"'}
-    data-src="${esc(url)}" ${alt ? `data-alt="${esc(alt)}"` : ''} alt="">`;
+  const alt = img.url.includes('assets.tcgdex.net/it/') ? img.url.replace('/it/', '/en/') : '';
+  return `<img class="${cls}" ${img.cors ? 'crossorigin="anonymous"' : ''}
+    data-src="${esc(img.url)}" ${alt ? `data-alt="${esc(alt)}"` : ''} alt="">`;
 }
 
 // Caricamento delle immagini delle carte. Aprendo un set ne servono centinaia: chiederle tutte
@@ -211,14 +219,27 @@ const imageQueue = (() => {
 
   function start(img) {
     active++;
-    img.onload = () => {
+    // Se il caricamento non dà né "fatto" né "errore" (es. pagina cambiata a metà), dopo 20 secondi
+    // il posto in coda si libera comunque: altrimenti la coda si bloccava e le immagini smettevano di arrivare.
+    let settled = false;
+    const release = () => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(watchdog);
       img.onload = img.onerror = null;
       active--;
-      pump();
+      return true;
+    };
+    const watchdog = setTimeout(() => { if (release() && img.isConnected) { failed(); } pump(); }, 20000);
+    img.onload = () => {
+      if (release()) pump();
     };
     img.onerror = () => {
-      img.onload = img.onerror = null;
-      active--;
+      if (!release()) return;
+      failed();
+      pump();
+    };
+    function failed() {
       const tries = +(img.dataset.tries ?? 0);
       if (tries < RETRIES) {
         img.dataset.tries = tries + 1;
@@ -234,7 +255,7 @@ const imageQueue = (() => {
         img.style.visibility = 'hidden';
       }
       pump();
-    };
+    }
     img.removeAttribute('src');
     img.src = img.dataset.src;
   }
@@ -247,8 +268,9 @@ const imageQueue = (() => {
     }
   }).observe(document.body, { childList: true, subtree: true });
 
-  return { pending: () => waiting.length + active };
+  return { state: () => ({ waiting: waiting.length, active }) };
 })();
+window.__imageQueue = imageQueue;   // per la diagnosi dalla console
 
 function tile(b) {
   const rec = coll.get(b.id);
@@ -310,6 +332,8 @@ async function home() {
       <button class="chip on" data-act="scan">Scansiona</button></header>
     <div id="updateSlot">${updateBanner()}</div>
     <div id="alertSlot">${alertBanner()}</div>
+    ${navigator.onLine ? '' : `<p class="note warnline">Sei senza connessione: funzionano la collezione, i set già aperti
+      e quelli scaricati per la modalità fiera (in Altro).</p>`}
     ${!native && coll.size && dirty >= BACKUP_REMINDER
       ? `<a class="warn" href="#/more">${dirty} modifiche non ancora salvate in un backup. Tocca per salvarle.</a>` : ''}
     <div class="tools searchrow"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}">
@@ -1209,7 +1233,11 @@ function backupStatus() {
   return `Ultimo backup: ${when} · ` + (dirty ? `${dirty} modifiche da allora` : 'tutto salvato');
 }
 
-function more() {
+async function more() {
+  try {
+    catalog ??= await getCatalog();
+    for (const serie of catalog) for (const s of serie.sets) setNames.set(s.id, s.name);
+  } catch { /* offline: menu dei set vuoto */ }
   view.innerHTML = `<header class="top"><h1>Altro</h1></header>
     <h2>Backup della collezione</h2>
     <p class="note" id="backupStatus">${backupStatus()}</p>
@@ -1222,6 +1250,19 @@ function more() {
     ${native ? `<h2>App</h2>
     <p class="note">Versione installata: ${esc(apkVersion())} · contenuti: ${esc(APP_VERSION)}</p>
     <div class="list"><button data-act="checkUpdate">Controlla aggiornamenti</button></div>` : ''}
+    <h2>Modalità fiera (senza internet)</h2>
+    <p class="note">Scarica in anticipo i set che ti servono: elenco delle carte, immagini e prezzi. In fiera
+      o in negozio l'app li mostra anche senza rete, e con la lista della spesa sai subito cosa ti manca.</p>
+    <div class="settings">
+      <select id="offSet">${options((catalog ?? []).flatMap(s => s.sets).map(s => [s.id, s.name]))}</select>
+      <label><input type="checkbox" id="offPrices" checked> anche i prezzi</label>
+      <button class="chip" data-act="offline">Scarica il set</button>
+      <button class="chip" data-act="offlineMine">Scarica i set della mia collezione</button>
+    </div>
+    <p class="note" id="offMsg"></p>
+    ${offlineSets.length ? `<div class="deals">${offlineSets.map(o => `<div class="deal-row"><span class="info">
+      <b>${esc(setNames.get(o.id) ?? o.id)}</b><small>scaricato il ${shortDate(o.date)} · ${plural(o.cards, 'carta', 'carte')}${o.prices ? ' con prezzi' : ''}${o.missing ? ` · ${o.missing} immagini non scaricate` : ''}</small></span>
+      <button class="chip" data-offline-again="${esc(o.id)}">Aggiorna</button></div>`).join('')}</div>` : ''}
     <h2>Manutenzione</h2>
     <div class="list">
       <button data-act="prices">Aggiorna i prezzi della collezione</button>
@@ -1231,6 +1272,45 @@ function more() {
     <p class="note">La collezione resta salvata su questo dispositivo anche chiudendo l'app. Il backup serve
       se cambi telefono o cancelli i dati del browser.<br>
       Dati e immagini: TCGdex. Prezzi: trend Cardmarket.</p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Modalità fiera: un set scaricato ha elenco carte e prezzi in IndexedDB e le immagini nella cache
+// del service worker, quindi si consulta senza connessione.
+// ---------------------------------------------------------------------------
+let offlineSets = [];   // [{ id, date, cards, prices, missing }]
+
+async function downloadSet(setId, withPrices, msg) {
+  const set = await getSet(setId);
+  const name = set.name;
+  const jobs = set.cards.map(c => ({ c, img: cardImageUrl(c.id, c.image, 'low') }));
+  let done = 0, missing = 0;
+  const queue = [...jobs];
+  await Promise.all(Array.from({ length: 6 }, async () => {
+    for (let j; (j = queue.shift());) {
+      // Passando dalla rete, il service worker salva l'immagine; le schede finiscono in IndexedDB.
+      if (j.img) {
+        try {
+          const res = await fetch(j.img.url, { mode: j.img.cors ? 'cors' : 'no-cors' });
+          if (j.img.cors && !res.ok) missing++;
+        } catch { missing++; }
+      }
+      if (withPrices) { try { await getCard(j.c.id); } catch { /* si riprova con Aggiorna */ } }
+      msg.textContent = `${name}: ${++done}/${jobs.length}`;
+    }
+  }));
+  offlineSets = [{ id: setId, date: new Date().toISOString().slice(0, 10), cards: jobs.length, prices: withPrices, missing },
+    ...offlineSets.filter(o => o.id !== setId)];
+  await db.put('settings', { key: 'offlineSets', value: offlineSets });
+}
+
+async function downloadSets(ids, withPrices) {
+  const msg = $('#offMsg');
+  for (const id of ids) {
+    try { await downloadSet(id, withPrices, msg); } catch { msg.textContent = 'Download interrotto: serve la connessione.'; return; }
+  }
+  msg.textContent = `Pronto: ${plural(ids.length, 'set scaricato', 'set scaricati')} per l'uso senza internet.`;
+  if (location.hash === '#/more') more();
 }
 
 // ---------------------------------------------------------------------------
@@ -1987,6 +2067,11 @@ view.addEventListener('click', async e => {
     for (const c of view.querySelectorAll('[data-filter]')) c.classList.toggle('on', c === filter);
     return renderGrid();
   }
+  const again = e.target.closest('[data-offline-again]');
+  if (again) {
+    const o = offlineSets.find(x => x.id === again.dataset.offlineAgain);
+    return downloadSets([o.id], o.prices);
+  }
   const goalDel = e.target.closest('[data-goal-del]');
   if (goalDel) {
     goals = goals.filter(g => g.id !== +goalDel.dataset.goalDel);
@@ -2052,6 +2137,12 @@ view.addEventListener('click', async e => {
     return stats();
   }
   if (act === 'pack') openPackDialog();
+  if (act === 'offline') downloadSets([$('#offSet').value], $('#offPrices').checked);
+  if (act === 'offlineMine') {
+    const mine = [...ownedBySet().keys()];
+    if (!mine.length) return toast('Non hai ancora carte: scegli un set dal menu.');
+    downloadSets(mine, $('#offPrices').checked);
+  }
   if (act === 'flip') openFlip(albumSet);
   if (act === 'shareWish') shareWishlist();
   if (act === 'shopping' && curSet) shareMissing(curSet.id);
@@ -2077,9 +2168,13 @@ view.addEventListener('click', async e => {
   if (act === 'export') exportBackup(msg);
   if (act === 'import') $('#file').click();
   if (act === 'cache') {
+    if (offlineSets.length && !confirm('Svuotando la cache perdi anche i set scaricati per la modalità fiera. Continuare?')) return;
     await db.clear('cache');
     curSet = null;
-    msg.textContent = 'Cache svuotata: il catalogo verrà riscaricato.';
+    offlineSets = [];
+    await db.put('settings', { key: 'offlineSets', value: offlineSets });
+    await more();
+    $('#msg').textContent = 'Cache svuotata: il catalogo verrà riscaricato.';
   }
 });
 
@@ -2140,7 +2235,7 @@ async function route() {
     else if (page === 'wish') wish();
     else if (page === 'album') await album();
     else if (page === 'search') advancedSearch();
-    else if (page === 'more') more();
+    else if (page === 'more') await more();
     else await home();
   } catch (err) {
     view.innerHTML = failed(err);
@@ -2210,6 +2305,7 @@ valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
 packs = (await db.get('settings', 'packs'))?.value ?? [];
 goals = (await db.get('settings', 'goals'))?.value ?? [];
+offlineSets = (await db.get('settings', 'offlineSets'))?.value ?? [];
 earnedBadges = (await db.get('settings', 'badges'))?.value ?? null;
 openPack = (await db.get('settings', 'openPack'))?.value ?? null;
 renderPackbar();

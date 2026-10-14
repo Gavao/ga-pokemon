@@ -156,3 +156,6 @@ $($lines -join "`n")
 
 "Immagini alternative trovate: $($map.Count)"
 $report
+
+# Le immagini di Limitless e TCGplayer si copiano dentro l'app (servono offline e si caricano prima).
+& (Join-Path $PSScriptRoot 'mirror-images.ps1')

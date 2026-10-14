@@ -17,6 +17,20 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
 
+  // Immagini copiate dentro l'app (img/, logos/): non cambiano mai, quindi prima la copia salvata.
+  if (url.origin === location.origin && /\/(img|logos)\//.test(url.pathname)) {
+    e.respondWith(
+      caches.open(IMAGES).then(async cache => {
+        const hit = await cache.match(e.request);
+        if (hit) return hit;
+        const res = await fetch(e.request);
+        if (res.ok) cache.put(e.request, res.clone());
+        return res;
+      })
+    );
+    return;
+  }
+
   // File dell'app: prima la rete (così le modifiche si vedono subito), poi la copia salvata.
   // "no-cache" chiede sempre al server se il file è cambiato: senza, il telefono poteva riusare
   // per 10 minuti la copia vecchia anche con una versione nuova già pubblicata.
