@@ -3,7 +3,7 @@ const SHELL = 'shell-v1';
 const IMAGES = 'images-v1';
 const FILES = [
   './', 'index.html', 'css/style.css',
-  'js/app.js', 'js/db.js', 'js/api.js', 'js/logos.js', 'js/images.js', 'js/scan.js', 'js/version.js', 'js/albums.js',
+  'js/app.js', 'js/db.js', 'js/api.js', 'js/logos.js', 'js/images.js', 'js/scan.js', 'js/version.js', 'js/albums.js', 'js/pokedex.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

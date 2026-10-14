@@ -60,6 +60,25 @@ function loadCatalog() {
   }, DAY);
 }
 
+// Nomi delle carte prese dall'elenco inglese: si traducono solo le parti fisse, quelle sicure
+// (energie, "Oscuro", "Lucente", "del Team Rocket", "di Brock"…). I nomi dei Pokémon in italiano sono
+// gli stessi dell'inglese; gli Allenatori restano in inglese per non inventare nomi sbagliati.
+const ENERGY = { Grass: 'Erba', Fire: 'Fuoco', Water: 'Acqua', Lightning: 'Lampo', Psychic: 'Psico', Fighting: 'Lotta',
+  Darkness: 'Oscurità', Metal: 'Metallo', Fairy: 'Folletto', Colorless: 'Incolore' };
+const OWNERS = /^(Brock|Misty|Lt\. Surge|Erika|Koga|Sabrina|Blaine|Giovanni|Lance|Rocket|Team Magma|Team Aqua|Holon)'s (.+)$/;
+export function italianize(name) {
+  let m;
+  if ((m = name.match(/^(?:Basic )?(\w+) Energy$/)) && ENERGY[m[1]]) return `Energia ${ENERGY[m[1]]}`;
+  if (name === 'Double Colorless Energy') return 'Energia Doppia Incolore';
+  if ((m = name.match(/^Dark (.+)$/))) return `${m[1]} Oscuro`;
+  if ((m = name.match(/^Light (.+)$/))) return `${m[1]} Luminoso`;
+  if ((m = name.match(/^Shining (.+)$/))) return `${m[1]} Lucente`;
+  if ((m = name.match(/^Team Rocket's (.+)$/))) return `${m[1]} del Team Rocket`;
+  if ((m = name.match(OWNERS))) return `${m[2]} di ${m[1]}`;
+  return name;
+}
+const italianCard = c => (c.lang === 'en' ? { ...c, name: italianize(c.name) } : c);
+
 // Carte di un set. Per molti set vecchi (e alcune promo) TCGdex non ha l'elenco in italiano o ce
 // l'ha incompleto: le carte mancanti si prendono dall'elenco inglese, con nome e immagine inglesi.
 export async function getSet(id) {
@@ -78,7 +97,7 @@ export async function getSet(id) {
     for (const c of it.cards) if (!enIds.has(c.id)) cards.push(c);
     return { ...it, cards };
   }, 7 * DAY);
-  return fixName(set);
+  return fixName({ ...set, cards: set.cards.map(italianCard) });
 }
 
 // Ricerca carte per nome in tutte le espansioni (serve la connessione): italiano più le carte
@@ -87,7 +106,7 @@ export async function searchCards(name) {
   const q = '/cards?name=' + encodeURIComponent(name);
   const [it, en] = await Promise.all([json(q), json(q, 'en').catch(() => [])]);
   const itIds = new Set(it.map(c => c.id));
-  return [...it, ...en.filter(c => !itIds.has(c.id)).map(c => ({ ...c, lang: 'en' }))];
+  return [...it, ...en.filter(c => !itIds.has(c.id)).map(c => italianCard({ ...c, lang: 'en' }))];
 }
 
 // Varianti di ogni carta di un set (cardId -> ['normal', 'holo', 'reverse', 'firstEdition']), per gli

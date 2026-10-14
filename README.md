@@ -13,3 +13,6 @@ App personale per gestire una collezione di carte Pokémon: espansioni e set in 
 - Pubblicare una modifica: commit e push su `main`; il telefono la riceve alla riapertura dell'app.
 - Rigenerare l'APK (solo se cambia `android/`): `powershell -ExecutionPolicy Bypass -File android\build.ps1`, poi pubblicarlo come nuova release con `gh release create vX.Y dist\GA-Pokemon.apk`
 - Aggiornare loghi e immagini alternative dopo l'uscita di nuovi set: `tools\update-logos.ps1`, `tools\update-images.ps1`
+  (quest'ultimo copia poi in `img/` le immagini di Limitless e TCGplayer con `tools\mirror-images.ps1`)
+- Aggiornare i nomi del Pokédex dopo l'uscita di nuovi Pokémon: `tools\update-pokedex.ps1`
+- Pubblicare: `tools\publish.ps1 "descrizione"` (timbra la versione: il telefono si aggiorna da solo)

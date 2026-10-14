@@ -54,6 +54,16 @@ async function setSlots(album, setId, owned) {
  */
 export async function albumLayout(album, owned) {
   const totalSides = Math.floor(album.capacity / album.perSide);
+  // Album Pokédex: un posto per ogni numero di Pokédex nell'intervallo scelto, tutto in una "riga".
+  if (album.kind === 'dex') {
+    const slots = Array.from({ length: album.to - album.from + 1 }, (_, i) => ({ dex: album.from + i }));
+    const fits = slots.length <= totalSides * album.perSide;
+    return {
+      album, totalSides, usedSides: Math.ceil(slots.length / album.perSide),
+      overflow: Math.max(0, slots.length - totalSides * album.perSide),
+      rows: [{ setId: 'dex', slots, start: 0, error: null, firstSide: 1, lastSide: Math.ceil(slots.length / album.perSide), fits }],
+    };
+  }
   const rows = [];
   let pos = 0;
   for (const setId of album.sets ?? []) {

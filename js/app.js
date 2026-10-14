@@ -1,6 +1,7 @@
 import { db } from './db.js';
 import { getCatalog, getSet, getCard, searchCards, getSetVariants, filterCards } from './api.js';
 import { DEFAULT_ALBUM, loadAlbums, saveAlbums, albumLayout, spot, columns } from './albums.js';
+import { POKEDEX, GENERATIONS } from './pokedex.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
 import { APP_VERSION } from './version.js';
@@ -585,7 +586,41 @@ let albums = [];                 // caricati all'avvio
 let currentAlbum = '', albumSet = '', todoLimit = 30;
 const layoutCache = new Map();   // album.id -> disposizione; si svuota a ogni modifica di carte o album
 
-const invalidateLayouts = () => layoutCache.clear();
+const invalidateLayouts = () => { layoutCache.clear(); dexCache = null; };
+const setAlbums = () => albums.filter(a => a.kind !== 'dex');
+
+// ---- Album Pokédex: un posto per ogni Pokémon. In ogni posto va la carta scelta da te ("Usa per il
+// Pokédex") o, se non hai scelto, la tua carta più pregiata di quel Pokémon.
+let dexCache = null;   // { albumId, choice: Map(numero -> rec), byCard: Map(cardId -> numero) }
+const dexAlbum = () => albums.find(a => a.kind === 'dex');
+
+function dexChoices(album) {
+  if (dexCache?.albumId === album.id) return dexCache;
+  const byDex = new Map();
+  for (const r of coll.values()) {
+    if (!qty(r) || r.category === 'Allenatore' || r.category === 'Energia') continue;
+    for (const n of r.dexId ?? []) {
+      if (n < album.from || n > album.to) continue;
+      if (!byDex.has(n)) byDex.set(n, []);
+      byDex.get(n).push(r);
+    }
+  }
+  const best = r => Math.max(...r.copies.map(c => unitPrice(r, c.variant)));
+  const choice = new Map(), byCard = new Map();
+  for (const [n, recs] of [...byDex].sort((a, b) => a[0] - b[0])) {
+    // Una carta fisica sta in un posto solo: le carte già usate per un altro numero si saltano.
+    const free = recs.filter(r => !byCard.has(r.cardId));
+    if (!free.length) continue;
+    const picked = free.find(r => r.cardId === album.picks?.[n]);
+    const rec = picked ?? free.sort((a, b) => rarityRank(b.rarity) - rarityRank(a.rarity) || best(b) - best(a))[0];
+    choice.set(n, rec);
+    byCard.set(rec.cardId, n);
+  }
+  dexCache = { albumId: album.id, choice, byCard };
+  return dexCache;
+}
+
+const dexLabel = n => `#${String(n).padStart(3, '0')} ${POKEDEX[n] ?? ''}`;
 
 // La carta c'è? Negli album master conta la variante, altrimenti basta una copia qualsiasi.
 const ownsVariant = (cardId, variant) => {
@@ -600,10 +635,13 @@ function layoutFor(album) {
 
 // Primo uso: nel primo album vanno i set di cui hai già carte, dal più vecchio al più recente.
 async function ensureAlbumInit() {
-  if (albums[0].sets !== null) return;
+  // Serve sempre almeno un album per i set (può restare solo quello Pokédex dopo un'eliminazione).
+  if (!setAlbums().length) albums.unshift({ id: 'a' + Date.now(), name: 'Album 1', ...DEFAULT_ALBUM, sets: [] });
+  const first = setAlbums()[0];
+  if (first.sets !== null) return;
   let order = [];
   try { order = (await getCatalog()).flatMap(s => s.sets.map(x => x.id)); } catch { /* offline */ }
-  albums[0].sets = [...ownedBySet().keys()].sort((a, b) => order.indexOf(b) - order.indexOf(a));
+  first.sets = [...ownedBySet().keys()].sort((a, b) => order.indexOf(b) - order.indexOf(a));
   await persistAlbums();
 }
 
@@ -612,14 +650,14 @@ async function ensureAlbumInit() {
 // album, che lo segnalerà come "serve più spazio".
 async function fileNewSet(setId) {
   await ensureAlbumInit();
-  if (albums.some(a => a.sets.includes(setId))) return;
-  for (const a of albums) {
+  if (setAlbums().some(a => a.sets.includes(setId))) return;
+  for (const a of setAlbums()) {
     if (!(await albumLayout({ ...a, sets: [...a.sets, setId] }, ownsVariant)).overflow) {
       a.sets.push(setId);
       return persistAlbums();
     }
   }
-  albums.at(-1).sets.push(setId);
+  setAlbums().at(-1).sets.push(setId);
   return persistAlbums();
 }
 
@@ -652,20 +690,32 @@ async function placementsOf(rec) {
   if (!qty(rec)) return [];
   await ensureAlbumInit();
   if (protectionOf(rec) === 'toploader') return [{ kind: 'toploader', key: 'tl', text: 'Nel toploader, fuori dall\'album' }];
-  const album = albums.find(a => a.sets?.includes(rec.setId));
-  if (!album) return [{ kind: 'none', key: '', text: 'Il suo set non è in nessun album' }];
+
+  // Carta scelta per l'album Pokédex: una copia va lì. Se è l'unica, nell'album del set il suo posto
+  // resta segnato "nel Pokédex".
+  const dex = dexAlbum();
+  const dexNum = dex && dexChoices(dex).byCard.get(rec.cardId);
+  const dexPlace = dexNum && (await layoutFor(dex)).rows[0].fits
+    ? { kind: 'slot', key: `${dex.id}:${dexNum - dex.from}:dex`, album: dex, slot: dexNum - dex.from,
+      text: `${placeText(dex, dexNum - dex.from)} · ${dexLabel(dexNum)}` }
+    : null;
+  if (dexPlace && qty(rec) < 2) return [dexPlace];
+  const withDex = list => (dexPlace ? [dexPlace, ...list] : list);
+
+  const album = setAlbums().find(a => a.sets?.includes(rec.setId));
+  if (!album) return withDex([{ kind: 'none', key: '', text: 'Il suo set non è in nessun album' }]);
   const row = (await layoutFor(album)).rows.find(r => r.setId === rec.setId);
-  if (!row || row.error) return [{ kind: 'none', key: '', text: 'Posizione non disponibile: serve la connessione' }];
-  if (!row.fits) return [{ kind: 'full', key: '', text: `Non entra in ${album.name}: serve più spazio o un altro album` }];
+  if (!row || row.error) return withDex([{ kind: 'none', key: '', text: 'Posizione non disponibile: serve la connessione' }]);
+  if (!row.fits) return withDex([{ kind: 'full', key: '', text: `Non entra in ${album.name}: serve più spazio o un altro album` }]);
   const owned = [...new Set(rec.copies.filter(c => c.qty > 0).map(c => c.variant))];
   const variants = album.master ? owned : [bestCopy(rec).variant];
-  return variants.map(v => {
+  return withDex(variants.map(v => {
     const i = row.slots.findIndex(s => s.card.id === rec.cardId && (!album.master || s.variant === v));
     if (i < 0) return { kind: 'none', key: '', text: `${VARIANTS[v] ?? v}: nessun posto in questo album` };
     const slot = row.start + i;
     const which = album.master || owned.length > 1 ? ` · la ${VARIANTS[v] ?? v}` : '';
     return { kind: 'slot', key: `${album.id}:${slot}:${v}`, album, slot, text: placeText(album, slot) + which };
-  });
+  }));
 }
 
 const isPlaced = (rec, p) => (rec.placed ?? []).includes(p.key);
@@ -738,8 +788,14 @@ async function album() {
     }
   }
 
+  // Album Pokédex: serve il numero di Pokédex di ogni carta, che sta nel suo dettaglio.
+  if (dexAlbum()) {
+    await fillDetails(recs);
+    invalidateLayouts();
+  }
   const layout = await layoutFor(cur);
-  if (!cur.sets.includes(albumSet)) albumSet = cur.sets[0] ?? '';
+  if (cur.kind === 'dex') albumSet = 'dex';
+  else if (!cur.sets.includes(albumSet)) albumSet = cur.sets[0] ?? '';
   const inAlbum = new Set(albums.flatMap(a => a.sets ?? []));
   const addable = order.filter(id => !inAlbum.has(id));
   const homeless = [...owned.keys()].filter(id => !inAlbum.has(id));
@@ -758,6 +814,7 @@ async function album() {
     <div class="chips albums">
       ${albums.map(a => `<button class="chip ${a.id === cur.id ? 'on' : ''}" data-album-act="pick" data-album-id="${esc(a.id)}">${esc(a.name)}</button>`).join('')}
       <button class="chip" data-album-act="new">+ Nuovo album</button>
+      ${dexAlbum() ? '' : '<button class="chip" data-album-act="newDex">+ Album Pokédex</button>'}
     </div>
 
     <h2>Da sistemare ${todo.length ? `<span class="count">${todo.length}</span>` : ''}</h2>
@@ -776,7 +833,7 @@ async function album() {
       ${homeless.map(id => esc(setName(id))).join(', ')}. Aggiungili a un album qui sotto.</p>` : ''}
 
     <h2>${esc(cur.name)}</h2>
-    <div class="settings">
+    ${cur.kind === 'dex' ? dexSettings(cur, layout) : `<div class="settings">
       <label>Nome <input type="text" maxlength="30" data-album="name" value="${esc(cur.name)}"></label>
       <label>Tasche totali <input type="number" min="4" step="1" data-album="capacity" value="${cur.capacity}"></label>
       <select data-album="perSide">${options([[4, '4 per facciata (2×2)'], [9, '9 per facciata (3×3)'], [12, '12 per facciata (3×4)']], cur.perSide)}</select>
@@ -813,13 +870,13 @@ async function album() {
       </select>
       <button class="chip" data-album-act="add">Aggiungi a ${esc(cur.name)}</button>
       ${albums.length > 1 ? `<button class="chip danger" data-album-act="delete">Elimina ${esc(cur.name)}</button>` : ''}
-    </div>
+    </div>`}
 
-    ${cur.sets.length ? `<h2>Pagine</h2>
+    ${cur.kind === 'dex' || cur.sets.length ? `<h2>Pagine</h2>
     <p class="note">Come le vedi aprendo l'album: a sinistra il retro di un foglio, a destra il fronte del
       successivo. I posti vuoti sono le carte che ti mancano; quelli tratteggiati in giallo le carte ancora
       da sistemare; TL le carte nel toploader (lascia il posto libero o un segnaposto).</p>
-    <div class="settings"><select id="albumSet">${options(cur.sets.map(id => [id, setName(id)]), albumSet)}</select>
+    <div class="settings">${cur.kind === 'dex' ? '' : `<select id="albumSet">${options(cur.sets.map(id => [id, setName(id)]), albumSet)}</select>`}
       <button class="chip on" data-act="flip">Sfoglia l'album</button></div>
     <div id="albumPages"></div>` : ''}
 
@@ -859,7 +916,7 @@ function renderSpreads(album, row) {
   if (!box || !row) return;
   if (row.error) { box.innerHTML = '<p class="note">Pagine non disponibili: serve la connessione per leggere il set.</p>'; return; }
   if (!row.slots.length) { box.innerHTML = '<p class="note">Nessuna carta di questo set da mettere nell\'album.</p>'; return; }
-  for (const s of row.slots) briefs.set(s.card.id, { ...s.card, setId: row.setId });
+  for (const s of row.slots) if (s.card) briefs.set(s.card.id, { ...s.card, setId: row.setId });
 
   const sides = new Map();   // numero facciata -> posti
   row.slots.forEach((s, i) => {
@@ -887,7 +944,13 @@ const spreadLabel = k => (k === 0 ? 'Prima pagina (fronte del foglio 1)' : `Retr
 /** Una tasca dell'album: carta (con TL/B e variante), posto vuoto della mancante o tasca libera. */
 function albumPocket(album, s, freeLabel) {
   if (!s) return `<div class="pocket other"><span>${freeLabel}</span></div>`;
+  if (s.dex !== undefined) return dexPocket(album, s);
   const rec = coll.get(s.card.id);
+  // Unica copia finita nell'album Pokédex: qui il posto resta libero, segnato.
+  const dex = dexAlbum();
+  if (rec && qty(rec) < 2 && dex && dexChoices(dex).byCard.has(rec.cardId) && protectionOf(rec) !== 'toploader') {
+    return `<div class="pocket tl dexmark" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>nel Pokédex</span></div>`;
+  }
   const tag = VARIANT_TAG[s.variant] ? `<i class="vtag">${VARIANT_TAG[s.variant]}</i>` : '';
   if (!ownsVariant(s.card.id, s.variant)) {
     return `<div class="pocket empty" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>${esc(s.card.name)}</span>${tag}</div>`;
@@ -900,6 +963,39 @@ function albumPocket(album, s, freeLabel) {
   const todo = !(rec.placed ?? []).includes(`${album.id}:${s.slot}:${variant}`);
   return `<div class="pocket ${todo ? 'todo' : ''}" data-card="${esc(s.card.id)}">${cardImg(s.card.id, s.card.image, 'low')}
     ${tag}${tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
+}
+
+/** Impostazioni dell'album Pokédex: nome, capienza, tasche e quali generazioni contiene. */
+function dexSettings(album, layout) {
+  const ranges = [[`1-${POKEDEX.length - 1}`, `Tutti (1–${POKEDEX.length - 1})`],
+    ...GENERATIONS.map(([a, b], i) => [`${a}-${b}`, `${i + 1}ª generazione (${a}–${b})`]),
+    ...GENERATIONS.slice(1).map(([, b], i) => [`1-${b}`, `Dalla 1ª alla ${i + 2}ª generazione (1–${b})`])];
+  const have = dexChoices(album).choice.size, total = album.to - album.from + 1;
+  return `<div class="settings">
+      <label>Nome <input type="text" maxlength="30" data-album="name" value="${esc(album.name)}"></label>
+      <label>Tasche totali <input type="number" min="4" step="1" data-album="capacity" value="${album.capacity}"></label>
+      <select data-album="perSide">${options([[4, '4 per facciata (2×2)'], [9, '9 per facciata (3×3)'], [12, '12 per facciata (3×4)']], album.perSide)}</select>
+      <select data-album="range">${options(ranges, `${album.from}-${album.to}`)}</select>
+    </div>
+    <p class="note">Hai ${have} Pokémon su ${total} (${Math.floor(have / total * 100)}%) ·
+      ${plural(layout.usedSides, 'facciata', 'facciate')} su ${layout.totalSides}
+      ${layout.overflow ? `· <b class="bad">non entra: mancano ${plural(layout.overflow, 'tasca', 'tasche')}</b>, scegli meno generazioni o più tasche` : ''}</p>
+    ${bar(have, total)}
+    <p class="note">Per ogni Pokémon va la tua carta più pregiata; per sceglierne un'altra apri la carta e
+      tocca "Usa per il Pokédex".</p>
+    <div class="settings"><button class="chip danger" data-album-act="delete">Elimina ${esc(album.name)}</button></div>`;
+}
+
+/** Tasca dell'album Pokédex: la carta scelta per quel Pokémon, oppure il posto vuoto con numero e nome. */
+function dexPocket(album, s) {
+  const rec = dexChoices(album).choice.get(s.dex);
+  if (!rec) return `<div class="pocket empty"><b>#${String(s.dex).padStart(3, '0')}</b><span>${esc(POKEDEX[s.dex] ?? '')}</span></div>`;
+  briefs.set(rec.cardId, recBrief(rec));
+  if (protectionOf(rec) === 'toploader') {
+    return `<div class="pocket tl" data-card="${esc(rec.cardId)}"><b>#${String(s.dex).padStart(3, '0')}</b><span>${esc(rec.name)} nel toploader</span><i class="tag">TL</i></div>`;
+  }
+  const todo = !(rec.placed ?? []).includes(`${album.id}:${s.slot}:dex`);
+  return `<div class="pocket ${todo ? 'todo' : ''}" data-card="${esc(rec.cardId)}">${cardImg(rec.cardId, rec.image, 'low')}</div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -915,7 +1011,7 @@ async function openFlip(startSet) {
     if (!row.fits) continue;
     row.slots.forEach((s, i) => {
       slots.set(row.start + i, { ...s, slot: row.start + i });
-      briefs.set(s.card.id, { ...s.card, setId: row.setId });
+      if (s.card) briefs.set(s.card.id, { ...s.card, setId: row.setId });
     });
   }
   const lastSide = Math.max(1, Math.min(layout.usedSides, layout.totalSides));
@@ -1350,6 +1446,7 @@ function renderSheet() {
       ? [p.nonFoil && `${cur.variants && !cur.variants.normal ? 'Prezzo' : 'Normale'} ${eur(p.nonFoil)}`, p.foil && `Foil ${eur(p.foil)}`].filter(Boolean).join(' · ')
       : 'Prezzo non disponibile'}</p>
     <p class="where" id="where"></p>
+    <p class="where" id="dexline"></p>
     ${cur.wish ? `<label class="alertline">Avvisami quando scende sotto
       <input id="alertInput" inputmode="decimal" placeholder="€" value="${cur.alert ?? ''}"> €</label>` : ''}
     <h3>Le mie copie <span>${qty(cur)}</span></h3>
@@ -1626,6 +1723,16 @@ async function shareText(title, text) {
 async function fillWhere() {
   const rec = cur;
   if (!rec || !qty(rec)) return;
+  // Album Pokédex: se la carta è di un Pokémon nell'intervallo, si può scegliere per il suo posto.
+  const dex = dexAlbum();
+  const n = dex && (rec.dexId ?? []).find(d => d >= dex.from && d <= dex.to);
+  if (n && rec.category !== 'Allenatore' && rec.category !== 'Energia') {
+    const chosen = dexChoices(dex).choice.get(n);
+    $('#dexline').innerHTML = chosen?.cardId === rec.cardId
+      ? `<b>Pokédex</b> È la carta di ${esc(dexLabel(n))} nel ${esc(dex.name)} ✓`
+      : `<b>Pokédex</b> Per ${esc(dexLabel(n))} ora c'è ${chosen ? esc(chosen.name) + ` (${esc(setNames.get(chosen.setId) ?? chosen.setId)})` : 'un posto vuoto'}
+         <button class="chip" data-dex-pick="${n}">Usa questa per il Pokédex</button>`;
+  }
   const places = await placementsOf(rec);
   const el = $('#where');
   if (!el || cur !== rec || !places.length) return;
@@ -1642,6 +1749,13 @@ sheet.addEventListener('click', async e => {
   if (!cur) return;
   if (e.target.closest('[data-mark-placed]')) {
     await markPlaced(cur);
+    return renderSheet();
+  }
+  const dexPick = e.target.closest('[data-dex-pick]');
+  if (dexPick) {
+    const dex = dexAlbum();
+    dex.picks = { ...dex.picks, [dexPick.dataset.dexPick]: cur.cardId };
+    await persistAlbums();
     return renderSheet();
   }
   const deal = e.target.closest('[data-deal]');
@@ -2136,7 +2250,7 @@ view.addEventListener('click', async e => {
   if (albumAct) {
     const what = albumAct.dataset.albumAct;
     const cur = albums.find(a => a.id === currentAlbum) ?? albums[0];
-    const i = cur.sets.indexOf(albumAct.dataset.set);
+    const i = cur.sets?.indexOf(albumAct.dataset.set) ?? -1;
     const move = (from, to) => cur.sets.splice(to, 0, cur.sets.splice(from, 1)[0]);
     if (what === 'pick') currentAlbum = albumAct.dataset.albumId;
     if (what === 'more') todoLimit = Infinity;
@@ -2146,6 +2260,11 @@ view.addEventListener('click', async e => {
     if (what === 'add' && $('#albumAdd').value) {
       cur.sets.push($('#albumAdd').value);
       albumSet = $('#albumAdd').value;
+    }
+    if (what === 'newDex') {
+      const created = { id: 'd' + Date.now(), name: 'Pokédex', kind: 'dex', capacity: 432, perSide: 9, from: 1, to: 151, picks: {} };
+      albums.push(created);
+      currentAlbum = created.id;
     }
     if (what === 'new') {
       const created = { id: 'a' + Date.now(), name: `Album ${albums.length + 1}`, ...DEFAULT_ALBUM, sets: [] };
@@ -2162,7 +2281,7 @@ view.addEventListener('click', async e => {
       albumAct.disabled = true;
       for (const { rec } of await toPlace()) await markPlaced(rec);
     }
-    if (['up', 'down', 'remove', 'add', 'new', 'delete'].includes(what)) await persistAlbums();
+    if (['up', 'down', 'remove', 'add', 'new', 'newDex', 'delete'].includes(what)) await persistAlbums();
     return album();
   }
   const act = e.target.closest('[data-act]')?.dataset.act;
@@ -2250,6 +2369,7 @@ view.addEventListener('change', e => {
     const cur = albums.find(a => a.id === currentAlbum) ?? albums[0], key = t.dataset.album;
     if (t.type === 'checkbox') cur[key] = t.checked;
     else if (key === 'name') cur.name = t.value.trim() || cur.name;
+    else if (key === 'range') [cur.from, cur.to] = t.value.split('-').map(Number);
     else if (+t.value > 0) cur[key] = Math.round(+t.value);
     persistAlbums().then(album);
   }
