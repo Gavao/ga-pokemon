@@ -530,7 +530,7 @@ async function stats() {
       <div><b>${eur(value)}</b><small>Valore stimato</small></div>
       <div><b>${recs.length}</b><small>Carte diverse</small></div>
       <div><b>${copies}</b><small>Copie totali</small></div>
-      <div><b>${copies - recs.length}</b><small>Doppioni</small></div>
+      <a href="#/doubles"><b>${doublesCount()}</b><small>Doppioni ›</small></a>
       ${paidCount ? `<div><b>${eur(spent)}</b><small>Speso (${plural(paidCount, 'copia', 'copie')} con prezzo)</small></div>
       <div><b class="${balance >= 0 ? 'up' : 'down'}">${balance >= 0 ? '+' : '−'}${eur(Math.abs(balance))}</b>
         <small>Oggi valgono ${eur(paidValue)}</small></div>` : ''}
@@ -823,9 +823,11 @@ async function placementsOf(rec) {
         if ((p = await slotIn(album, u))) break;
       }
       if (!p) {
-        const inAlbum = out.some(x => x.kind === 'slot');
-        if (!inAlbum && !setAlbum) p = { ...box(boxFor(rec, false), u), note: 'Il suo set non è in nessun album' };
-        else p = box(boxFor(rec, inAlbum), u);
+        // Doppione = un'altra copia della stessa versione già sistemata; le altre versioni fanno parte
+        // della collezione e vanno nella scatola del loro set (o in "tutto il resto").
+        const isDouble = out.some(x => x.unit?.v === u.v);
+        if (!isDouble && !setAlbum) p = { ...box(boxFor(rec, false), u), note: 'Il suo set non è in nessun album' };
+        else p = box(boxFor(rec, isDouble), u);
       }
     }
     // Automatico spento: è solo una proposta, da confermare.
@@ -969,7 +971,6 @@ async function album() {
   const tiers = { toploader: [], sleeve: [], album: [] };
   for (const r of recs) tiers[protectionOf(r)].push(r);
   const copiesOf = list => list.reduce((a, r) => a + qty(r), 0);
-  const doubles = recs.filter(r => qty(r) > 1);
   const toComplete = [...owned.keys()].map(id => {
     const tot = names.get(id)?.cardCount.total ?? 0;
     return { id, n: owned.get(id), tot, pct: tot ? owned.get(id) / tot : 0 };
@@ -1093,9 +1094,9 @@ async function album() {
     </div>`).join('')}
 
     <h2>Doppioni</h2>
-    ${doubles.length ? group('Copie in più, da scambiare', doubles,
-      ` · ${copiesOf(doubles) - doubles.length} in più`)
-      + '<div class="settings"><button class="chip" data-act="shareDoubles">Condividi la lista dei doppioni</button></div>'
+    ${doublesCount() ? `<p class="note">${plural(doublesCount(), 'doppione', 'doppioni')}: copie in più della stessa versione.</p>
+      <div class="settings"><a class="chip on" href="#/doubles">Gestisci i doppioni</a>
+        <button class="chip" data-act="shareDoubles">Condividi la lista</button></div>`
       : '<p class="note">Nessun doppione.</p>'}`;
 
   renderSpreads(cur, layout.rows.find(r => r.setId === albumSet));
@@ -1703,23 +1704,113 @@ async function saveDeals() {
   autoBackup();
 }
 
+/** Registra una vendita/scambio/regalo di n copie di una riga e le toglie dalla collezione. */
+async function addDeal(rec, c, n, kind, price, who, note) {
+  deals.unshift({
+    id: Date.now(), date: new Date().toISOString().slice(0, 10), kind, qty: n,
+    cardId: rec.cardId, name: rec.name, setId: rec.setId, localId: rec.localId, image: rec.image,
+    variant: c.variant, condition: c.condition, lang: c.lang, paid: c.paid ?? null,
+    value: unitPrice(rec, c.variant), price: kind === 'sold' && price >= 0 ? price : null, who, note,
+  });
+  c.qty -= n;
+  await saveDeals();
+  await save(rec);
+  toast(`${DEAL_KINDS[kind]}: ${esc(rec.name)} ×${n}. La trovi in Collezione → Vendite e scambi.`);
+}
+
 async function confirmDeal(i) {
   const c = cur.copies[i];
   const n = Math.min(c.qty, Math.max(1, Math.round(+$('#dealQty').value || 1)));
   const price = parseFloat($('#dealPrice').value.replace(',', '.'));
-  const kind = $('#dealKind').value;
-  deals.unshift({
-    id: Date.now(), date: new Date().toISOString().slice(0, 10), kind, qty: n,
-    cardId: cur.cardId, name: cur.name, setId: cur.setId, localId: cur.localId, image: cur.image,
-    variant: c.variant, condition: c.condition, lang: c.lang, paid: c.paid ?? null,
-    value: unitPrice(cur, c.variant), price: kind === 'sold' && price >= 0 ? price : null,
-    who: $('#dealWho').value.trim(), note: $('#dealNote').value.trim(),
-  });
-  c.qty -= n;
   dealFor = null;
-  await saveDeals();
-  await save(cur);
-  toast(`${DEAL_KINDS[kind]}: ${esc(cur.name)} ×${n}. La trovi in Collezione → Vendite e scambi.`);
+  await addDeal(cur, c, n, $('#dealKind').value, price, $('#dealWho').value.trim(), $('#dealNote').value.trim());
+}
+
+// ---------------------------------------------------------------------------
+// Doppioni: copie oltre la prima della stessa versione (normale, holo, reverse…). Ogni versione fa
+// parte della collezione; i doppioni hanno uno stato (da scambiare, in vendita con prezzo, da tenere)
+// salvato sulla carta, quindi anche nel backup.
+// ---------------------------------------------------------------------------
+const DUP_STATES = { trade: 'Da scambiare', sale: 'In vendita', keep: 'Da tenere' };
+let dupSort = 'set', dupFilter = 'all';
+
+function doublesOf(rec) {
+  const byVariant = new Map();
+  for (const c of rec.copies) byVariant.set(c.variant, (byVariant.get(c.variant) ?? 0) + c.qty);
+  return [...byVariant].filter(([, n]) => n > 1).map(([variant, n]) => ({
+    variant, n: n - 1, state: rec.dups?.[variant]?.state ?? 'trade', price: rec.dups?.[variant]?.price ?? null,
+  }));
+}
+const doublesCount = () => [...coll.values()].reduce((a, r) => a + doublesOf(r).reduce((s, d) => s + d.n, 0), 0);
+
+async function doublesPage() {
+  const names = await catalogNames();
+  for (const [id, s] of names) setNames.set(id, s.name);
+  const all = [...coll.values()].flatMap(r => doublesOf(r).map(d => ({ r, ...d, value: unitPrice(r, d.variant) })));
+  const items = all.filter(d => dupFilter === 'all' || d.state === dupFilter);
+  const total = (list, f) => list.reduce((a, d) => a + f(d), 0);
+  const row = d => `<div class="dup-row">
+      <div class="thumb" data-card="${esc(d.r.cardId)}">${cardImg(d.r.cardId, d.r.image, 'low')}</div>
+      <span class="info"><b>${esc(d.r.name)}</b>
+        <small>${esc(setNames.get(d.r.setId) ?? d.r.setId)} · n° ${esc(d.r.localId)} · ${esc(VARIANTS[d.variant] ?? d.variant)} · ×${d.n}${d.value ? ` · ~${eur(d.value)} cad.` : ''}</small>
+        <span class="dup-controls">
+          <select data-dup-state="${esc(d.r.cardId)}|${esc(d.variant)}">${options(Object.entries(DUP_STATES), d.state)}</select>
+          ${d.state === 'sale' ? `<input data-dup-price="${esc(d.r.cardId)}|${esc(d.variant)}" inputmode="decimal" placeholder="Prezzo €" value="${d.price ?? (d.value ? d.value.toFixed(2).replace('.', ',') : '')}">` : ''}
+        </span>
+        <span class="dup-controls">${Object.entries(DEAL_KINDS).map(([k, label]) =>
+          `<button class="chip" data-dup-deal="${k}|${esc(d.r.cardId)}|${esc(d.variant)}">${label}</button>`).join('')}</span>
+      </span>
+    </div>`;
+  let body;
+  if (dupSort === 'value') {
+    body = items.sort((a, b) => b.value - a.value).map(row).join('');
+  } else {
+    const bySet = new Map();
+    for (const d of items) bySet.set(d.r.setId, [...(bySet.get(d.r.setId) ?? []), d]);
+    body = [...bySet].sort((a, b) => (setNames.get(a[0]) ?? '').localeCompare(setNames.get(b[0]) ?? '')).map(([id, list]) =>
+      `<h2>${esc(setNames.get(id) ?? id)} <span class="count">${total(list, d => d.n)}</span> <small>${eur(total(list, d => d.n * d.value))}</small></h2>
+       ${list.sort((a, b) => String(a.r.localId).localeCompare(String(b.r.localId), undefined, { numeric: true })).map(row).join('')}`).join('');
+  }
+  view.innerHTML = `<header class="top"><a class="back" href="#/stats" aria-label="Indietro">‹</a><h1>Doppioni</h1>
+      ${all.length ? '<button class="chip" data-act="shareDoubles">Condividi</button>' : ''}</header>
+    <div class="kpis">
+      <div><b>${total(all, d => d.n)}</b><small>Doppioni · ${eur(total(all, d => d.n * d.value))}</small></div>
+      <div><b>${eur(total(all.filter(d => d.state === 'sale'), d => d.n * (d.price ?? d.value)))}</b><small>In vendita (prezzi richiesti)</small></div>
+    </div>
+    <div class="chips dup-chips">
+      ${[['set', 'Per set'], ['value', 'Per valore']].map(([k, l]) => `<button class="chip ${dupSort === k ? 'on' : ''}" data-dup-sort="${k}">${l}</button>`).join('')}
+      ${[['all', 'Tutti'], ...Object.entries(DUP_STATES)].map(([k, l]) => `<button class="chip ${dupFilter === k ? 'on' : ''}" data-dup-filter="${k}">${l}</button>`).join('')}
+    </div>
+    ${body || `<p class="empty">${all.length ? 'Nessun doppione con questo stato.' : 'Non hai doppioni: una seconda copia della stessa versione di una carta comparirà qui.'}</p>`}
+    <p class="note">Doppione = una copia in più della stessa versione: normale, holo e reverse della stessa carta
+      fanno tutte parte della collezione.</p>`;
+}
+
+/** Stato o prezzo richiesto di un doppione: salvati sulla carta. */
+async function setDup(key, field, value) {
+  const [cardId, variant] = key.split('|');
+  const rec = structuredClone(coll.get(cardId));
+  rec.dups = { ...rec.dups, [variant]: { ...rec.dups?.[variant], [field]: value } };
+  await save(rec);
+}
+
+/** Venduta / scambiata / regalata dalla lista: si dà via la copia in condizioni peggiori di quella versione. */
+async function quickDeal(kind, cardId, variant) {
+  const rec = structuredClone(coll.get(cardId));
+  const c = rec.copies.filter(x => x.variant === variant && x.qty > 0)
+    .sort((a, b) => CONDITIONS.indexOf(b.condition) - CONDITIONS.indexOf(a.condition))[0];
+  if (!c) return;
+  let price = null;
+  if (kind === 'sold') {
+    const ask = rec.dups?.[variant]?.price ?? unitPrice(rec, variant);
+    const v = prompt('Prezzo incassato (€)', ask ? String(Math.round(ask * 100) / 100).replace('.', ',') : '');
+    if (v === null) return;
+    price = parseFloat(v.replace(',', '.'));
+  }
+  const who = prompt(kind === 'gift' ? 'A chi? (facoltativo)' : 'Con chi? (facoltativo)', '');
+  if (who === null) return;
+  const note = kind === 'traded' ? (prompt('Cosa hai ricevuto in cambio? (facoltativo)', '') ?? '') : '';
+  await addDeal(rec, c, 1, kind, price, who.trim(), note.trim());
 }
 
 /** Annulla una vendita registrata per errore: la copia torna nella collezione. */
@@ -1907,14 +1998,21 @@ async function shareWishlist() {
 // Lista dei doppioni da mandare a chi scambia con te.
 async function shareDoubles() {
   try { for (const serie of await getCatalog()) for (const s of serie.sets) setNames.set(s.id, s.name); } catch { /* offline */ }
-  const lines = [...coll.values()].filter(r => qty(r) > 1)
-    .sort((a, b) => (setNames.get(a.setId) ?? '').localeCompare(setNames.get(b.setId) ?? '') || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }))
-    .map(r => {
-      const v = unitPrice(r, bestCopy(r).variant);
-      return `• ${r.name} — ${setNames.get(r.setId) ?? r.setId} n° ${r.localId} ×${qty(r) - 1}${v ? ` (~${eur(v)})` : ''}`;
-    });
-  if (!lines.length) return toast('Non hai doppioni da condividere.');
-  shareText('Doppioni da scambiare', `I miei doppioni Pokémon da scambiare:\n\n${lines.join('\n')}`);
+  // Solo i doppioni disponibili (non quelli "da tenere"), raggruppati per set.
+  const items = [...coll.values()].flatMap(r => doublesOf(r).filter(d => d.state !== 'keep').map(d => ({ r, ...d })))
+    .sort((a, b) => (setNames.get(a.r.setId) ?? '').localeCompare(setNames.get(b.r.setId) ?? '')
+      || String(a.r.localId).localeCompare(String(b.r.localId), undefined, { numeric: true }));
+  if (!items.length) return toast('Non hai doppioni disponibili da condividere.');
+  const lines = [];
+  let lastSet = null;
+  for (const d of items) {
+    if (d.r.setId !== lastSet) lines.push(`\n${setNames.get(d.r.setId) ?? d.r.setId}`);
+    lastSet = d.r.setId;
+    const value = unitPrice(d.r, d.variant);
+    const price = d.state === 'sale' ? ` — in vendita a ${eur(d.price ?? value)}` : value ? ` (~${eur(value)})` : '';
+    lines.push(`• ${d.r.localId} ${d.r.name}${d.variant !== 'normal' ? ` (${VARIANTS[d.variant] ?? d.variant})` : ''} ×${d.n}${price}`);
+  }
+  shareText('I miei doppioni', `I miei doppioni Pokémon (scambio o vendita):\n${lines.join('\n')}`);
 }
 
 /** Condivisione di un testo: nell'APK il menu di Android, nel browser quello del telefono, altrimenti appunti. */
@@ -2072,7 +2170,7 @@ function afterClose() {
   const id = cur.cardId;
   cur = null;
   const page = location.hash.replace(/^#\/?/, '').split('/')[0];
-  if (page === 'stats' || page === 'wish' || page === 'album') route();
+  if (['stats', 'wish', 'album', 'doubles'].includes(page)) route();
   else refreshCard(id);
 }
 // L'evento "close" copre il tasto Indietro del telefono; può arrivare in ritardo, quindi
@@ -2536,6 +2634,16 @@ view.addEventListener('click', async e => {
     await save(rec);
     return album();
   }
+  const dupSortBtn = e.target.closest('[data-dup-sort]');
+  if (dupSortBtn) { dupSort = dupSortBtn.dataset.dupSort; return doublesPage(); }
+  const dupFilterBtn = e.target.closest('[data-dup-filter]');
+  if (dupFilterBtn) { dupFilter = dupFilterBtn.dataset.dupFilter; return doublesPage(); }
+  const dupDeal = e.target.closest('[data-dup-deal]');
+  if (dupDeal) {
+    const [kind, cardId, variant] = dupDeal.dataset.dupDeal.split('|');
+    await quickDeal(kind, cardId, variant);
+    return doublesPage();
+  }
   const boxAct = e.target.closest('[data-box-act]');
   if (boxAct) {
     const what = boxAct.dataset.boxAct, box = storage.boxes.find(b => b.id === boxAct.dataset.box);
@@ -2705,6 +2813,11 @@ view.addEventListener('change', e => {
     else if (+t.value > 0) cur[key] = Math.round(+t.value);
     persistAlbums().then(album);
   }
+  if (t.dataset.dupState) setDup(t.dataset.dupState, 'state', t.value).then(doublesPage);
+  if (t.dataset.dupPrice) {
+    const v = parseFloat(t.value.replace(',', '.'));
+    setDup(t.dataset.dupPrice, 'price', v >= 0 ? v : null).then(doublesPage);
+  }
   if (t.dataset.storage) {   // regole: automatico e soglie in euro
     const key = t.dataset.storage;
     if (key === 'auto') storage.auto = t.checked;
@@ -2747,7 +2860,7 @@ document.addEventListener('error', e => {
 // ---------------------------------------------------------------------------
 async function route() {
   const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const tab = page === 'set' ? 'home' : page || 'home';
+  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' ? 'stats' : page || 'home';
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab);
   try {
     if (page === 'set') await setView(decodeURIComponent(arg));
@@ -2755,6 +2868,7 @@ async function route() {
     else if (page === 'wish') wish();
     else if (page === 'album') await album();
     else if (page === 'search') advancedSearch();
+    else if (page === 'doubles') await doublesPage();
     else if (page === 'more') await more();
     else await home();
   } catch (err) {
