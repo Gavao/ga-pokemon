@@ -541,6 +541,103 @@ body:has(#packbar:not([hidden])) #view { padding-bottom: calc(var(--nav-h) + env
 .deal-row .info { flex: 1; min-width: 0; }
 .deal-row small { display: block; }
 
+/* Menu laterale */
+.menu-btn { flex: none; padding: 0 8px 2px 0; background: none; border: 0; color: var(--text); font-size: 24px; line-height: 1; }
+#drawer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 30;
+  width: min(84vw, 320px);
+  padding: calc(env(safe-area-inset-top) + 10px) 0 calc(env(safe-area-inset-bottom) + 16px);
+  overflow-y: auto;
+  background: #10234a;
+  color: #e8ecf5;
+  box-shadow: 4px 0 24px rgba(0, 0, 0, .4);
+  transform: translateX(-105%);
+  transition: transform .22s ease;
+}
+body.drawer-open #drawer { transform: none; }
+#drawerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 29;
+  background: rgba(0, 0, 0, .55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .22s;
+}
+body.drawer-open #drawerBackdrop { opacity: 1; pointer-events: auto; }
+.drawer-head { display: flex; align-items: center; gap: 12px; padding: 10px 18px 18px; border-bottom: 1px solid rgba(255, 255, 255, .1); }
+.drawer-head img { width: 44px; height: 44px; border-radius: 10px; }
+.drawer-head b { display: block; font-size: 19px; }
+.drawer-head small { color: #9fb0d0; }
+.drawer-group { border-bottom: 1px solid rgba(255, 255, 255, .06); }
+.drawer-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 15px 18px;
+  background: none;
+  border: 0;
+  color: inherit;
+  font-size: 16px;
+  text-align: left;
+}
+.drawer-group.open .drawer-title { background: rgba(255, 255, 255, .07); }
+.drawer-icon { width: 22px; text-align: center; font-size: 18px; color: var(--accent); }
+.drawer-title .chev { margin-left: auto; color: #9fb0d0; font-size: 18px; transition: transform .2s; }
+.drawer-group.open .chev { transform: rotate(-90deg); }
+.drawer-items { display: none; position: relative; padding: 4px 0 8px; }
+.drawer-group.open .drawer-items { display: block; }
+.drawer-items::before { content: ''; position: absolute; left: 29px; top: 10px; bottom: 18px; width: 2px; background: rgba(255, 255, 255, .15); }
+.drawer-items a, .drawer-items button {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 11px 18px 11px 56px;
+  background: none;
+  border: 0;
+  color: #c9d3e6;
+  font-size: 15px;
+  text-align: left;
+}
+.drawer-items a::before, .drawer-items button::before {
+  content: '';
+  position: absolute;
+  left: 25px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #5b6f96;
+}
+.drawer-items a.on { color: var(--accent); font-weight: 600; }
+.drawer-items a.on::before { background: var(--accent); }
+
+/* Statistiche */
+.chart { background: var(--panel); border-radius: 12px; padding: 10px 12px 8px; margin-bottom: 8px; }
+.chart-read { margin: 0 0 6px; font-size: 13px; color: var(--text); min-height: 1.4em; }
+.chart-legend { display: flex; gap: 14px; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+.chart-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.chart-scroll { overflow-x: auto; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart svg text { fill: var(--muted); font-size: 9px; }
+.chart .axis { stroke: var(--line); stroke-width: 1; }
+.chart [data-tip] { cursor: pointer; }
+.chart-max, .chart-axis small { font-size: 11px; color: var(--muted); }
+.chart-axis { display: flex; justify-content: space-between; margin-top: 4px; }
+.hbars { display: grid; gap: 6px; padding: 0 12px 12px; }
+.hbar { display: grid; grid-template-columns: 9em 1fr 3em; gap: 8px; align-items: center; font-size: 12px; }
+.hbar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar b { text-align: right; }
+.hbar-track { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+.hbar-track i { display: block; height: 100%; border-radius: 4px; }
+.subhead { font-size: 14px; margin: 14px 0 6px; }
+
 /* Set da completare */
 .complete-row { padding: 10px 12px; margin-bottom: 8px; background: var(--panel); border-radius: 12px; }
 .complete-row.followed { border: 1px solid var(--accent); }

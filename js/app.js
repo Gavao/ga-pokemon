@@ -2,6 +2,7 @@ import { db } from './db.js';
 import { getCatalog, getSet, getCard, searchCards, getSetVariants, filterCards } from './api.js';
 import { DEFAULT_ALBUM, loadAlbums, saveAlbums, albumLayout, spot, columns } from './albums.js';
 import { POKEDEX, GENERATIONS } from './pokedex.js';
+import { bars, lines, hbars } from './charts.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
 import { APP_VERSION } from './version.js';
@@ -525,7 +526,7 @@ async function stats() {
   const paidCount = paid.reduce((a, { c }) => a + c.qty, 0);
   const balance = paidValue - spent;
 
-  view.innerHTML = `<header class="top"><h1>Collezione</h1></header>
+  view.innerHTML = `<header class="top"><h1>Collezione</h1><a class="chip" href="#/statistics">Statistiche</a></header>
     <div class="kpis">
       <div><b>${eur(value)}</b><small>Valore stimato</small></div>
       <div><b>${recs.length}</b><small>Carte diverse</small></div>
@@ -1392,6 +1393,217 @@ async function saveSetGoals() {
   autoBackup();
 }
 
+// ---------------------------------------------------------------------------
+// Statistiche: spesa, valore, resa per set, affari, distribuzioni, crescita, vendite, bustine.
+// ---------------------------------------------------------------------------
+const C_CARDS = '#ffcb05', C_PACKS = '#4f8cff';   // giallo dell'app e blu: distinguibili anche per chi non vede i colori
+
+const monthKey = d => d.slice(0, 7);
+const monthLabel = k => new Date(k + '-15').toLocaleDateString('it-IT', { month: 'short', year: '2-digit' });
+function lastMonths(n) {
+  const out = [], now = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 15);
+    out.push(d.toISOString().slice(0, 7));
+  }
+  return out;
+}
+
+// Prezzo pagato medio per una versione di una carta (dalle copie in cui l'hai indicato).
+function paidOf(rec, variant) {
+  const rows = rec?.copies.filter(c => c.variant === variant && c.paid != null) ?? [];
+  const n = rows.reduce((a, c) => a + c.qty, 0);
+  return n ? rows.reduce((a, c) => a + c.paid * c.qty, 0) / n : 0;
+}
+
+async function statisticsPage() {
+  view.innerHTML = loading;
+  const names = await catalogNames();
+  const serieOf = new Map();
+  try { for (const serie of await getCatalog()) for (const s of serie.sets) serieOf.set(s.id, serie.name); } catch { /* offline */ }
+  const recs = [...coll.values()].filter(qty);
+  await fillDetails(recs);   // tipi e rarità per le distribuzioni
+  const months = lastMonths(12);
+  const log = addsLog ?? [];
+
+  // Spesa per mese: carte (copie aggiunte × prezzo pagato) e bustine.
+  const cardSpend = months.map(m => log.filter(e => e.d !== 'prima' && monthKey(e.d) === m)
+    .reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0));
+  const packSpend = months.map(m => packs.filter(p => monthKey(p.date) === m).reduce((a, p) => a + (p.price ?? 0), 0));
+
+  // Speso contro valore: speso cumulato (dalle carte di "prima" in poi) e valore a fine mese.
+  const spentBefore = log.filter(e => e.d === 'prima').reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0)
+    + packs.filter(p => monthKey(p.date) < months[0]).reduce((a, p) => a + (p.price ?? 0), 0)
+    + log.filter(e => e.d !== 'prima' && monthKey(e.d) < months[0]).reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0);
+  let run = spentBefore;
+  const spentCum = months.map((m, i) => (run += cardSpend[i] + packSpend[i]));
+  const valueAt = months.map(m => valueLog.filter(p => monthKey(p.d) <= m).at(-1)?.v ?? null);
+
+  // Resa per set: speso (copie con prezzo + bustine di quel set) contro valore attuale.
+  const bySet = new Map();
+  for (const r of recs) {
+    const s = bySet.get(r.setId) ?? { spent: 0, value: 0 };
+    s.spent += r.copies.reduce((a, c) => a + (c.paid ?? 0) * c.qty, 0);
+    s.value += recValue(r);
+    bySet.set(r.setId, s);
+  }
+  for (const p of packs) {
+    const s = bySet.get(p.setId) ?? { spent: 0, value: 0 };
+    s.spent += p.price ?? 0;
+    bySet.set(p.setId, s);
+  }
+  const setYield = [...bySet].filter(([, s]) => s.spent > 0).sort((a, b) => (b[1].value - b[1].spent) - (a[1].value - a[1].spent));
+
+  // Affari: per ogni gruppo di copie con prezzo pagato, valore di oggi meno quanto l'hai pagata.
+  const affairs = recs.flatMap(r => r.copies.filter(c => c.paid != null)
+    .map(c => ({ r, c, diff: (unitPrice(r, c.variant) - c.paid) * c.qty })));
+  const best = [...affairs].sort((a, b) => b.diff - a.diff).filter(a => a.diff > 0).slice(0, 5);
+  const worst = [...affairs].sort((a, b) => a.diff - b.diff).filter(a => a.diff < 0).slice(0, 5);
+
+  // Distribuzioni (copie).
+  const count = keyOf => {
+    const m = new Map();
+    for (const r of recs) for (const c of r.copies) for (const k of [].concat(keyOf(r, c))) m.set(k, (m.get(k) ?? 0) + c.qty);
+    return [...m].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+  };
+  const byRarity = count(r => rarityLabel(r.rarity)).slice(0, 10);
+  const byType = count(r => (r.types?.length ? r.types : [r.category === 'Allenatore' ? 'Allenatore' : r.category === 'Energia' ? 'Energia' : 'Senza tipo']));
+  const byEra = count(r => serieOf.get(r.setId) ?? 'Altro');
+  const byLang = count((r, c) => c.lang || '—');
+
+  // Crescita: copie aggiunte per mese.
+  const growth = months.map(m => log.filter(e => e.d !== 'prima' && monthKey(e.d) === m).reduce((a, e) => a + e.n, 0));
+  const before = log.filter(e => e.d === 'prima').reduce((a, e) => a + e.n, 0);
+
+  // Vendite e scambi per mese.
+  const sales = months.map(m => deals.filter(d => monthKey(d.date) === m && d.kind === 'sold').reduce((a, d) => a + (d.price ?? 0), 0));
+  const tradesN = months.map(m => deals.filter(d => monthKey(d.date) === m && d.kind !== 'sold').reduce((a, d) => a + d.qty, 0));
+
+  // Bustine: per mese spesa e valore trovato; colpi migliori.
+  const packValue = months.map(m => packs.filter(p => monthKey(p.date) === m)
+    .reduce((a, p) => a + p.cards.reduce((s, c) => s + c.value, 0), 0));
+  const bestPulls = packs.flatMap(p => p.cards.map(c => ({ ...c, date: p.date }))).sort((a, b) => b.value - a.value).slice(0, 5);
+
+  const labels = months.map(monthLabel);
+  const money = v => eur(v);
+  const affairRow = a => `<div class="deal-row"><span class="info"><b>${esc(a.r.name)}</b>
+    <small>${esc(names.get(a.r.setId)?.name ?? a.r.setId)} · ${esc(VARIANTS[a.c.variant] ?? a.c.variant)} ×${a.c.qty} · pagata ${eur(a.c.paid)}, oggi ${eur(unitPrice(a.r, a.c.variant))}</small></span>
+    <b class="${a.diff >= 0 ? 'up' : 'down'}">${a.diff >= 0 ? '+' : '−'}${eur(Math.abs(a.diff))}</b></div>`;
+
+  view.innerHTML = `<header class="top"><h1>Statistiche</h1></header>
+    ${recs.length ? '' : '<p class="empty">Aggiungi qualche carta per vedere le statistiche.</p>'}
+
+    <h2>Spesa per mese</h2>
+    ${bars({ labels, series: [{ name: 'Carte', color: C_CARDS, values: cardSpend }, { name: 'Bustine', color: C_PACKS, values: packSpend }], fmt: money })}
+    <p class="note">Le carte contano nel mese in cui le aggiungi, con il prezzo pagato che indichi nella loro scheda.</p>
+
+    <h2>Speso contro valore</h2>
+    ${lines({ labels, series: [{ name: 'Speso (totale)', color: C_PACKS, values: spentCum }, { name: 'Valore collezione', color: C_CARDS, values: valueAt }], fmt: money })}
+
+    <h2>Resa per set</h2>
+    ${setYield.length ? setYield.map(([id, s]) => `<div class="deal-row"><span class="info"><b>${esc(names.get(id)?.name ?? id)}</b>
+      <small>speso ${eur(s.spent)} · vale ${eur(s.value)}</small></span>
+      <b class="${s.value >= s.spent ? 'up' : 'down'}">${s.value >= s.spent ? '+' : '−'}${eur(Math.abs(s.value - s.spent))}</b></div>`).join('')
+      : '<p class="note">Indica il prezzo pagato delle carte (o registra le bustine) per vedere la resa di ogni set.</p>'}
+
+    <h2>Migliori affari</h2>
+    ${best.map(affairRow).join('') || '<p class="note">Nessuna carta vale più di quanto l\'hai pagata (o non hai indicato prezzi pagati).</p>'}
+    <h2>Peggiori affari</h2>
+    ${worst.map(affairRow).join('') || '<p class="note">Nessuna carta vale meno di quanto l\'hai pagata.</p>'}
+
+    <h2>Distribuzione</h2>
+    <details class="group" open><summary><span>Per rarità</span><small>copie</small></summary>${hbars(byRarity, v => v, C_CARDS)}</details>
+    <details class="group"><summary><span>Per tipo</span><small>copie</small></summary>${hbars(byType, v => v, C_CARDS)}</details>
+    <details class="group"><summary><span>Per era</span><small>copie</small></summary>${hbars(byEra, v => v, C_CARDS)}</details>
+    <details class="group"><summary><span>Per lingua</span><small>copie</small></summary>${hbars(byLang, v => v, C_CARDS)}</details>
+
+    <h2>Crescita della collezione</h2>
+    ${bars({ labels, series: [{ name: 'Copie aggiunte', color: C_CARDS, values: growth }], fmt: v => `${v} copie` })}
+    ${before ? `<p class="note">Più ${plural(before, 'copia', 'copie')} che avevi già prima che l'app registrasse le date.</p>` : ''}
+
+    <h2>Vendite e scambi nel tempo</h2>
+    ${deals.length ? bars({ labels, series: [{ name: 'Incassi', color: C_CARDS, values: sales }], fmt: money })
+      + bars({ labels, series: [{ name: 'Copie scambiate o regalate', color: C_PACKS, values: tradesN }], fmt: v => `${v} copie` })
+      : '<p class="note">Nessuna vendita o scambio registrato.</p>'}
+
+    <h2>Bustine nel dettaglio</h2>
+    ${packs.length ? bars({ labels, series: [{ name: 'Spesa', color: C_PACKS, values: packSpend }, { name: 'Valore trovato', color: C_CARDS, values: packValue }], fmt: money })
+      + `<h3 class="subhead">Colpi migliori</h3>${bestPulls.map(c => `<div class="deal-row"><span class="info"><b>${esc(c.name)}</b>
+        <small>${esc(names.get(c.setId)?.name ?? c.setId)} · ${shortDate(c.date)}</small></span><b>${eur(c.value)}</b></div>`).join('')}
+      ${packsSection()}`
+      : '<p class="note">Nessuna bustina registrata: usa il pulsante "Bustina" quando ne apri una.</p>'}`;
+}
+
+// ---------------------------------------------------------------------------
+// Menu laterale: tutte le funzioni dell'app, raggruppate in sezioni che si aprono e si chiudono.
+// Si apre con ☰ in alto a sinistra di ogni pagina; la barra in basso resta per le voci più usate.
+// Voce: [etichetta, indirizzo '#/…'] oppure [etichetta, null, azione].
+// ---------------------------------------------------------------------------
+const MENU = [
+  ['◓', 'Catalogo', [['Espansioni', '#/'], ['Ricerca avanzata', '#/search'], ['Scansiona una carta', null, 'scan'], ['Wishlist', '#/wish']]],
+  ['▤', 'La mia collezione', [['Riepilogo', '#/stats'], ['Statistiche', '#/statistics'], ['Doppioni', '#/doubles']]],
+  ['▦', 'Album e conservazione', [['Album e scatole', '#/album'], ['Set da completare', '#/complete'], ['Sfoglia l\'album', null, 'flip']]],
+  ['◈', 'Acquisti', [['Apri una bustina', null, 'pack'], ['Modalità fiera', '#/more']]],
+  ['⚙', 'Impostazioni', [['Backup e ripristino', '#/more'], ['Aggiornamenti e manutenzione', '#/more']]],
+];
+const drawer = $('#drawer');
+const openGroups = new Set([0]);   // sezioni aperte: valgono finché l'app resta aperta
+
+function renderDrawer() {
+  const here = location.hash || '#/';
+  drawer.innerHTML = `<div class="drawer-head"><img src="icons/icon-192.png" alt=""><div><b>GA Pokémon</b>
+      <small>${plural([...coll.values()].filter(qty).length, 'carta', 'carte')} · ${eur([...coll.values()].reduce((a, r) => a + recValue(r), 0))}</small></div></div>
+    ${MENU.map(([icon, title, items], g) => `<div class="drawer-group ${openGroups.has(g) ? 'open' : ''}">
+      <button class="drawer-title" data-group="${g}"><span class="drawer-icon">${icon}</span>${esc(title)}<span class="chev">‹</span></button>
+      <div class="drawer-items">${items.map(([label, href, act]) => href
+        ? `<a href="${href}" class="${href === here ? 'on' : ''}">${esc(label)}</a>`
+        : `<button data-menu-act="${act}">${esc(label)}</button>`).join('')}</div>
+    </div>`).join('')}`;
+}
+
+function openDrawer() {
+  renderDrawer();
+  document.body.classList.add('drawer-open');
+}
+function closeDrawer() {
+  document.body.classList.remove('drawer-open');
+}
+
+drawer.addEventListener('click', e => {
+  const title = e.target.closest('[data-group]');
+  if (title) {
+    const g = +title.dataset.group;
+    if (openGroups.has(g)) openGroups.delete(g);
+    else openGroups.add(g);
+    title.parentElement.classList.toggle('open');
+    return;
+  }
+  const act = e.target.closest('[data-menu-act]')?.dataset.menuAct;
+  if (e.target.closest('a') || act) closeDrawer();
+  if (act === 'scan') openScanner();
+  if (act === 'pack') openPackDialog();
+  if (act === 'flip') {
+    if (location.hash !== '#/album') location.hash = '#/album';
+    setTimeout(() => openFlip(albumSet), 600);
+  }
+});
+$('#drawerBackdrop').addEventListener('click', closeDrawer);
+
+// Ogni pagina ha il pulsante ☰ all'inizio della sua intestazione.
+new MutationObserver(() => {
+  const head = view.querySelector('.top');
+  if (head && !head.querySelector('.menu-btn')) {
+    head.insertAdjacentHTML('afterbegin', '<button class="menu-btn" data-menu aria-label="Apri il menu">☰</button>');
+  }
+}).observe(view, { childList: true });
+view.addEventListener('click', e => { if (e.target.closest('[data-menu]')) openDrawer(); });
+
+// Riga di lettura dei grafici: toccando una barra o un punto compare il suo valore.
+view.addEventListener('click', e => {
+  const tip = e.target.closest?.('[data-tip]');
+  if (tip) tip.closest('.chart').querySelector('.chart-read').textContent = tip.dataset.tip;
+});
+
 // Stima del costo per completare un set: somma dei prezzi trend delle carte mancanti.
 async function completionCost(setId, label) {
   const set = await getSet(setId);
@@ -2243,7 +2455,10 @@ sheet.addEventListener('click', async e => {
   } else return;
   await save(cur);
   renderSheet();
-  if (added) await recordInPack(cur, added.variant);
+  if (added) {
+    recordAdd(cur, added.variant);
+    await recordInPack(cur, added.variant);
+  }
 });
 
 sheet.addEventListener('change', async e => {
@@ -2303,6 +2518,10 @@ sheet.addEventListener('close', afterClose);
 
 // Chiamata dall'APK quando si preme Indietro: true = gestito qui (c'era la scheda carta aperta).
 window.appBack = () => {
+  if (document.body.classList.contains('drawer-open')) {
+    closeDrawer();
+    return true;
+  }
   if (sheet.open) {
     sheet.close();
     afterClose();
@@ -2483,7 +2702,19 @@ async function addCopy(id) {
   await save(rec);
   refreshCard(id);
   toastPlacement(rec);
+  recordAdd(rec, rec.copies[0].variant);
   await recordInPack(rec, rec.copies[0].variant);
+}
+
+// Registro delle aggiunte (giorno, carta, versione, copie): serve alle statistiche "spesa per mese"
+// e "crescita della collezione". Le carte che c'erano prima del registro stanno in una voce "prima".
+let addsLog = null;
+let addsTimer;
+function recordAdd(rec, variant, n = 1) {
+  addsLog ??= [];
+  addsLog.push({ d: new Date().toISOString().slice(0, 10), id: rec.cardId, v: variant, n });
+  clearTimeout(addsTimer);
+  addsTimer = setTimeout(() => db.put('settings', { key: 'addsLog', value: addsLog }), 1000);
 }
 
 async function refreshPrices(msg) {
@@ -3016,7 +3247,7 @@ document.addEventListener('error', e => {
 // ---------------------------------------------------------------------------
 async function route() {
   const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' ? 'stats' : page === 'complete' ? 'album' : page || 'home';
+  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' || page === 'statistics' ? 'stats' : page === 'complete' ? 'album' : page || 'home';
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab);
   try {
     if (page === 'set') await setView(decodeURIComponent(arg));
@@ -3026,6 +3257,7 @@ async function route() {
     else if (page === 'search') advancedSearch();
     else if (page === 'doubles') await doublesPage();
     else if (page === 'complete') await completePage();
+    else if (page === 'statistics') await statisticsPage();
     else if (page === 'more') await more();
     else await home();
   } catch (err) {
@@ -3036,6 +3268,7 @@ async function route() {
 // Ogni pagina ricorda dov'era lo scorrimento: tornando indietro da un set si ritrova il punto di prima.
 const scrollPos = new Map();
 addEventListener('hashchange', async e => {
+  closeDrawer();
   scrollPos.set(new URL(e.oldURL).hash, scrollY);
   await route();
   scrollTo(0, scrollPos.get(location.hash) ?? 0);
@@ -3098,6 +3331,11 @@ packs = (await db.get('settings', 'packs'))?.value ?? [];
 goals = (await db.get('settings', 'goals'))?.value ?? [];
 setGoals = (await db.get('settings', 'setGoals'))?.value ?? {};
 setAnalysis = (await db.get('settings', 'setAnalysis'))?.value ?? {};
+addsLog = (await db.get('settings', 'addsLog'))?.value ?? null;
+if (!addsLog && coll.size) {   // prima volta: le carte che ci sono già finiscono nella voce "prima"
+  addsLog = [...coll.values()].flatMap(r => r.copies.map(c => ({ d: 'prima', id: r.cardId, v: c.variant, n: c.qty })));
+  await db.put('settings', { key: 'addsLog', value: addsLog });
+}
 // Regole e scatole; la prima volta si riprendono le soglie che c'erano prima.
 storage = { ...structuredClone(DEFAULT_STORAGE), ...(await db.get('settings', 'storage'))?.value };
 if (meta.get('tlEuro') && !(await db.get('settings', 'storage'))) storage.tl = meta.get('tlEuro');
