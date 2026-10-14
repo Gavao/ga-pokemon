@@ -17,6 +17,19 @@ $scrydexId = @{
   '2023sv' = 'mcd23'; '2024sv' = 'mcd24'
 }
 
+# Chiamata all'API di TCGdex con nuovi tentativi: ogni tanto risponde "no available server" o
+# "occupato" per qualche secondo, e senza riprovare lo script si fermava a metà.
+function Get-Json($url) {
+  for ($try = 1; ; $try++) {
+    try { return Invoke-RestMethod $url -TimeoutSec 60 }
+    catch {
+      $status = $_.Exception.Response.StatusCode.value__
+      if ($status -eq 404 -or $try -ge 6) { throw }
+      Start-Sleep -Seconds (5 * $try)
+    }
+  }
+}
+
 function Get-Length($url) {
   try { [long](Invoke-WebRequest $url -Method Head -UseBasicParsing -TimeoutSec 20 -UserAgent 'Mozilla/5.0').Headers['Content-Length'] } catch { 0 }
 }
@@ -29,15 +42,12 @@ $placeholder = Get-Length "$scrydex/zzzz-1/small"
 function Get-Images($lang, $setId) {
   $m = @{}
   try {
-    foreach ($c in (Invoke-RestMethod "$api/$lang/sets/$([uri]::EscapeDataString($setId))").cards) {
+    foreach ($c in (Get-Json "$api/$lang/sets/$([uri]::EscapeDataString($setId))").cards) {
       if ($c.image) { $m[$c.localId] = $c.image }
     }
   } catch { }
   $m
 }
-
-$setIds = (Invoke-RestMethod "$api/it/series").id | Where-Object { $_ -ne 'tcgp' } |
-  ForEach-Object { (Invoke-RestMethod "$api/it/series/$_").sets.id }
 
 # Controllo in parallelo di molti indirizzi: url -> $true se l'immagine c'è davvero.
 Add-Type -AssemblyName System.Net.Http
@@ -61,20 +71,20 @@ function Test-Urls([string[]]$urls) {
   $ok
 }
 
-$setIds = (Invoke-RestMethod "$api/it/series").id | Where-Object { $_ -ne 'tcgp' } |
-  ForEach-Object { (Invoke-RestMethod "$api/it/series/$_").sets.id }
+$setIds = (Get-Json "$api/it/series").id | Where-Object { $_ -ne 'tcgp' } |
+  ForEach-Object { (Get-Json "$api/it/series/$_").sets.id }
 
 $map = [ordered]@{}
 $report = @()
 foreach ($id in $setIds) {
   # Stesso elenco che usa l'app (js/api.js, getSet): italiano, completato con l'inglese.
-  $set = Invoke-RestMethod "$api/it/sets/$([uri]::EscapeDataString($id))"
+  $set = Get-Json "$api/it/sets/$([uri]::EscapeDataString($id))"
   $en = Get-Images 'en' $id
   $cards = @($set.cards)
   if ($cards.Count -lt $set.cardCount.total) {
     $itIds = @{}; foreach ($c in $cards) { $itIds[$c.id] = 1 }
     try {
-      foreach ($c in (Invoke-RestMethod "$api/en/sets/$([uri]::EscapeDataString($id))").cards) { if (-not $itIds[$c.id]) { $cards += $c } }
+      foreach ($c in (Get-Json "$api/en/sets/$([uri]::EscapeDataString($id))").cards) { if (-not $itIds[$c.id]) { $cards += $c } }
     } catch { }
   }
   # Come fa l'app: se manca l'immagine italiana si usa quella inglese (segnata, per cercare comunque
@@ -121,7 +131,7 @@ foreach ($id in $setIds) {
     if (-not $url) {
       # Ultima spiaggia: la foto prodotto di TCGplayer (inglese), tramite l'id che TCGdex riporta per la carta.
       try {
-        $d = Invoke-RestMethod "$api/en/cards/$([uri]::EscapeDataString($c.id))"
+        $d = Get-Json "$api/en/cards/$([uri]::EscapeDataString($c.id))"
         $tp = @($d.thirdParty.tcgplayer) + @($d.variants_detailed.thirdParty.tcgplayer) | Where-Object { $_ } | Select-Object -First 1
         if ($tp -and (Test-Url "https://product-images.tcgplayer.com/$tp.jpg")) {
           $url = "https://product-images.tcgplayer.com/$tp.jpg"; $count.en++
