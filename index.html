@@ -36,12 +36,14 @@
       <button class="primary" data-shot>Scatta e riconosci</button>
       <label class="chip">Usa una foto<input type="file" accept="image/*" id="scanFile" hidden></label>
     </div>
+    <label class="burst"><input type="checkbox" id="scanBurst"> Raffica: aggiungi da sola le carte riconosciute con sicurezza</label>
     <p class="note" id="scanMsg"></p>
     <form id="scanFix" hidden>
       <input id="scanNumber" inputmode="text" autocomplete="off" placeholder="Numero giusto, es. 81/198">
       <button class="chip">Cerca</button>
     </form>
     <div id="scanResults"></div>
+    <div id="scanLog"></div>
   </dialog>
 
   <script type="module" src="js/app.js"></script>

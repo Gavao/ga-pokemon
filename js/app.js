@@ -367,7 +367,7 @@ async function setView(id) {
     </header>
     <div class="tools">
       <input id="q" type="search" placeholder="Cerca per nome o numero" value="${esc(setQuery)}">
-      <div class="chips">${Object.entries(SET_FILTERS).map(([k, label]) =>
+      <div class="chips"><button class="chip" data-act="shopping">Lista della spesa</button>${Object.entries(SET_FILTERS).map(([k, label]) =>
         `<button class="chip ${k === setFilter ? 'on' : ''}" data-filter="${k}">${label}</button>`).join('')}</div>
     </div>
     <div class="grid" id="grid"></div>`;
@@ -889,7 +889,8 @@ async function completionCost(setId, label) {
 
 function wish() {
   const recs = [...coll.values()].filter(r => r.wish);
-  view.innerHTML = `<header class="top"><h1>Wishlist</h1></header>` + (recs.length
+  view.innerHTML = `<header class="top"><h1>Wishlist</h1>
+      ${recs.length ? '<button class="chip" data-act="shareWish">Condividi</button>' : ''}</header>` + (recs.length
     ? `<div class="grid">${recs.map(r => tile(recBrief(r))).join('')}</div>`
     : '<p class="empty">Nessuna carta in wishlist.<br>Apri una carta e tocca ★.</p>');
 }
@@ -1052,6 +1053,43 @@ function dealsSection() {
     </div>`).join('')}</div>`;
 }
 
+// Prezzo indicativo di una carta (trend Cardmarket della versione normale, altrimenti foil).
+const cardPrice = d => {
+  const cm = d?.pricing?.cardmarket;
+  return cm ? cm.trend || cm.avg || cm['trend-holo'] || cm['avg-holo'] || 0 : 0;
+};
+
+// Lista della spesa: le carte che mancano di un set, con prezzo indicativo e totale.
+async function shareMissing(setId) {
+  const set = await getSet(setId);
+  const missing = set.cards.filter(c => !qty(coll.get(c.id)));
+  if (!missing.length) return toast(`Hai completato ${esc(set.name)}!`);
+  const prices = new Map(), queue = [...missing];
+  let done = 0;
+  await Promise.all(Array.from({ length: 6 }, async () => {
+    for (let c; (c = queue.shift());) {
+      try { prices.set(c.id, cardPrice(await getCard(c.id))); } catch { /* senza prezzo */ }
+      toast(`Preparo la lista… ${++done}/${missing.length}`);
+    }
+  }));
+  const total = [...prices.values()].reduce((a, p) => a + p, 0);
+  const lines = missing.map(c => `• ${c.localId} ${c.name}${prices.get(c.id) ? ` — ~${eur(prices.get(c.id))}` : ''}`);
+  toast('Lista pronta.');
+  shareText(`Mi mancano di ${set.name}`,
+    `Carte che mi mancano di ${set.name} (${missing.length}):\n\n${lines.join('\n')}\n\nTotale indicativo: ~${eur(total)} (prezzi trend Cardmarket)`);
+}
+
+async function shareWishlist() {
+  try { for (const serie of await getCatalog()) for (const s of serie.sets) setNames.set(s.id, s.name); } catch { /* offline */ }
+  const recs = [...coll.values()].filter(r => r.wish);
+  if (!recs.length) return toast('La wishlist è vuota.');
+  const lines = recs.map(r => {
+    const p = unitPrice(r, r.variants && !r.variants.normal ? 'holo' : 'normal');
+    return `• ${r.name} — ${setNames.get(r.setId) ?? r.setId} n° ${r.localId}${p ? ` (~${eur(p)})` : ''}`;
+  });
+  shareText('La mia wishlist Pokémon', `Le carte che cerco:\n\n${lines.join('\n')}`);
+}
+
 // Lista dei doppioni da mandare a chi scambia con te.
 async function shareDoubles() {
   try { for (const serie of await getCatalog()) for (const s of serie.sets) setNames.set(s.id, s.name); } catch { /* offline */ }
@@ -1173,6 +1211,8 @@ let scanStream = null;
 async function openScanner() {
   $('#scanMsg').textContent = '';
   $('#scanResults').innerHTML = '';
+  burstLog = [];
+  renderBurstLog();
   scanner.showModal();
   try {
     scanStream = await navigator.mediaDevices.getUserMedia({
@@ -1231,6 +1271,35 @@ async function showMatches(reading) {
   $('#scanNumber').value = '';
   $('#scanResults').innerHTML = found.length ? `<div class="grid">${found.map(c =>
     `<div class="result">${tile(c)}<small>${esc(c.setName)}</small></div>`).join('')}</div>` : '';
+
+  // Raffica: se il riconoscimento è sicuro (numero e nome tornano, e nessun'altra carta ci si
+  // avvicina) la carta si aggiunge da sola e si passa alla prossima; altrimenti si sceglie a mano.
+  const [best, second] = found;
+  if ($('#scanBurst').checked && best && best.score >= 1.6 && (!second || best.score - second.score >= 0.3)) {
+    await quickAdd(best.id);
+    burstLog.unshift({ id: best.id, name: best.name, setName: best.setName, localId: best.localId });
+    msg.textContent = `Aggiunta: ${best.name} (${best.setName} n° ${best.localId}). Inquadra la prossima.`;
+    $('#scanResults').innerHTML = '';
+    $('#scanFix').hidden = true;
+    renderBurstLog();
+  }
+}
+
+// Carte aggiunte in raffica in questa sessione, con la possibilità di toglierle se sbagliate.
+let burstLog = [];
+function renderBurstLog() {
+  $('#scanLog').innerHTML = burstLog.length ? `<h3>Aggiunte in raffica <span>${burstLog.length}</span></h3>
+    ${burstLog.map((b, i) => `<div class="burst-row"><span>${esc(b.name)} <small>${esc(b.setName)} n° ${esc(b.localId)}</small></span>
+      <button class="chip" data-burst-undo="${i}">Togli</button></div>`).join('')}` : '';
+}
+
+/** Toglie una copia aggiunta per sbaglio (l'ultima della prima riga di copie). */
+async function removeOne(id) {
+  const rec = structuredClone(coll.get(id));
+  if (!rec?.copies.length) return;
+  rec.copies[rec.copies.length - 1].qty--;
+  await save(rec);
+  refreshCard(id);
 }
 
 // Correzione a mano del numero letto male: stessa ricerca, con il nome letto dalla foto.
@@ -1249,6 +1318,12 @@ scanner.addEventListener('click', e => {
   if (e.target.closest('[data-shot]')) {
     if (!scanStream) return $('#scanFile').click();
     return recognize(captureFromVideo(scanVideo, scanner.querySelector('.frame')));
+  }
+  const undo = e.target.closest('[data-burst-undo]');
+  if (undo) {
+    const [b] = burstLog.splice(+undo.dataset.burstUndo, 1);
+    removeOne(b.id).then(renderBurstLog);
+    return;
   }
   const add = e.target.closest('[data-add]');
   if (add) return quickAdd(add.dataset.add);
@@ -1516,6 +1591,8 @@ view.addEventListener('click', async e => {
   if (act === 'prices') await refreshPrices(msg);
   if (act === 'scan') openScanner();
   if (act === 'shareDoubles') shareDoubles();
+  if (act === 'shareWish') shareWishlist();
+  if (act === 'shopping' && curSet) shareMissing(curSet.id);
   if (act === 'cost') {
     const btn = e.target.closest('[data-act]');
     btn.remove();
