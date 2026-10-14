@@ -373,6 +373,22 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 #toast.on { opacity: 1; transform: translate(-50%, 0); }
 .setrow .info a { color: inherit; }
 
+.up { color: #5fd38d; }
+.down { color: var(--red); }
+
+/* Grafico del valore nel tempo */
+.vchart { background: var(--panel); border-radius: 12px; padding: 12px 12px 8px; }
+.vchart-read { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
+.vchart-read b { color: var(--text); font-size: 18px; margin-right: 6px; }
+.vchart-read span { margin-right: 4px; font-weight: 600; }
+.vchart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.vchart .grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.vchart .line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.vchart .area { fill: var(--accent); opacity: .12; }
+.vchart .cross { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.vchart .dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.vchart-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: 11px; }
+
 /* Altro */
 .list { display: grid; gap: 8px; }
 .list button { text-align: left; padding: 14px; background: var(--panel); border: 0; border-radius: 12px; }
@@ -429,6 +445,7 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 }
 .copy input, .copy select { background: var(--bg); padding: 8px 6px; }
 .copy input { grid-column: span 2; }
+.copy input.wide { grid-column: 1 / -1; }
 .stepper { display: flex; align-items: center; gap: 2px; }
 .stepper b { min-width: 24px; text-align: center; }
 .stepper button { width: 34px; height: 34px; border: 0; border-radius: 50%; background: var(--line); font-size: 18px; }

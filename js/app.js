@@ -147,6 +147,7 @@ async function save(rec) {
     await db.put('cards', rec);
     if (qty(rec) && albums.length && ownedBySet().get(rec.setId) === 1) await fileNewSet(rec.setId);
   }
+  recordValue();
 }
 
 function ownedBySet() {
@@ -483,13 +484,26 @@ async function stats() {
   }).filter(([, list]) => list.length);
   const missingDetails = recs.filter(r => r.category === undefined && !detailsTried.has(r.cardId)).length;
 
+  // Speso contro valore, solo sulle copie di cui hai indicato il prezzo pagato.
+  const paid = recs.flatMap(r => r.copies.filter(c => c.paid != null).map(c => ({ r, c })));
+  const spent = paid.reduce((a, { c }) => a + c.paid * c.qty, 0);
+  const paidValue = paid.reduce((a, { r, c }) => a + unitPrice(r, c.variant) * c.qty, 0);
+  const paidCount = paid.reduce((a, { c }) => a + c.qty, 0);
+  const balance = paidValue - spent;
+
   view.innerHTML = `<header class="top"><h1>Collezione</h1></header>
     <div class="kpis">
       <div><b>${eur(value)}</b><small>Valore stimato</small></div>
       <div><b>${recs.length}</b><small>Carte diverse</small></div>
       <div><b>${copies}</b><small>Copie totali</small></div>
       <div><b>${copies - recs.length}</b><small>Doppioni</small></div>
+      ${paidCount ? `<div><b>${eur(spent)}</b><small>Speso (${plural(paidCount, 'copia', 'copie')} con prezzo)</small></div>
+      <div><b class="${balance >= 0 ? 'up' : 'down'}">${balance >= 0 ? '+' : '−'}${eur(Math.abs(balance))}</b>
+        <small>Oggi valgono ${eur(paidValue)}</small></div>` : ''}
     </div>
+    ${recs.length && !paidCount ? `<p class="note">Indica il prezzo pagato nella scheda di una carta
+      (campo "Pagata €") per vedere quanto hai speso e quanto ci guadagni.</p>` : ''}
+    ${recs.length ? `<h2>Valore nel tempo</h2>${valueChart(valueLog)}` : ''}
     ${recs.length ? `<p class="note">Valori: prezzo medio di vendita su Cardmarket (trend) per una copia
       in buone condizioni. Sono indicativi: lingua, condizione e gradazione possono cambiarli molto.</p>`
       : '<p class="empty">Non hai ancora aggiunto carte.<br>Apri un set e tocca + su una carta.</p>'}
@@ -950,7 +964,8 @@ function renderSheet() {
       <select data-f="lang">${options(LANGS.map(x => [x, x]), c.lang)}</select>
       <div class="stepper"><button data-step="-1">−</button><b>${c.qty}</b><button data-step="1">+</button></div>
       <input data-f="grade" placeholder="Gradazione (es. PSA 10)" value="${esc(c.grade)}">
-      <input data-f="note" placeholder="Note" value="${esc(c.note)}">
+      <input data-f="paid" inputmode="decimal" placeholder="Pagata € (a copia)" value="${c.paid ?? ''}">
+      <input data-f="note" class="wide" placeholder="Note" value="${esc(c.note)}">
     </div>`).join('')}
     <button class="primary" data-newcopy>+ Aggiungi copia</button>`;
   fillWhere();
@@ -991,7 +1006,11 @@ sheet.addEventListener('click', async e => {
 sheet.addEventListener('change', async e => {
   const f = e.target.dataset.f;
   if (!f || !cur) return;
-  cur.copies[+e.target.closest('.copy').dataset.i][f] = e.target.value.trim();
+  const value = e.target.value.trim();
+  // Prezzo pagato: numero con virgola o punto; vuoto = non indicato.
+  cur.copies[+e.target.closest('.copy').dataset.i][f] = f === 'paid'
+    ? (value ? Math.max(0, parseFloat(value.replace(',', '.'))) || 0 : null)
+    : value;
   await save(cur);
 });
 
@@ -1164,9 +1183,85 @@ async function refreshPrices(msg) {
     }
   }));
   msg.textContent = `Prezzi aggiornati: ${done - errors} carte` + (errors ? `, ${errors} non riuscite.` : '.');
+  meta.set('pricesAt', Date.now());
+  recordValue();
 }
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums });
+// ---------------------------------------------------------------------------
+// Valore nel tempo: un punto al giorno (valore totale e copie), nel database e nel backup.
+// I prezzi si riaggiornano da soli una volta a settimana, così la curva segue il mercato.
+// ---------------------------------------------------------------------------
+let valueLog = [];
+const PRICE_REFRESH_EVERY = 7 * 24 * 60 * 60 * 1000;
+let logTimer;
+
+function recordValue() {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(async () => {
+    const recs = [...coll.values()];
+    const v = Math.round(recs.reduce((a, r) => a + recValue(r), 0) * 100) / 100;
+    const n = recs.reduce((a, r) => a + qty(r), 0);
+    const d = new Date().toISOString().slice(0, 10);
+    const last = valueLog.at(-1);
+    if (last?.d === d) Object.assign(last, { v, n });
+    else valueLog.push({ d, v, n });
+    await db.put('settings', { key: 'valueLog', value: valueLog });
+  }, 2000);
+}
+
+const shortDate = iso => new Date(iso + 'T12:00:00').toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: '2-digit' });
+
+/** Grafico a linea del valore della collezione; toccandolo si leggono data e valore di ogni giorno. */
+function valueChart(log) {
+  if (log.length < 2) {
+    return `<p class="note">Il grafico si forma giorno dopo giorno: l'app segna il valore della collezione
+      ogni giorno in cui la usi${log.length ? ` (primo punto: ${shortDate(log[0].d)}, ${eur(log[0].v)})` : ''}.</p>`;
+  }
+  const W = 600, H = 170, L = 6, R = 6, T = 10, B = 10;
+  const t0 = Date.parse(log[0].d), t1 = Date.parse(log.at(-1).d);
+  const values = log.map(p => p.v);
+  const min = Math.min(...values), max = Math.max(...values);
+  const pad = (max - min) * 0.12 || max * 0.05 || 1;
+  const lo = Math.max(0, min - pad), hi = max + pad;
+  const x = d => L + (Date.parse(d) - t0) / (t1 - t0 || 1) * (W - L - R);
+  const y = v => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const pts = log.map(p => [x(p.d), y(p.v)]);
+  const line = pts.map(([a, b], i) => `${i ? 'L' : 'M'}${a.toFixed(1)},${b.toFixed(1)}`).join('');
+  const change = log.at(-1).v - log[0].v;
+  const data = esc(JSON.stringify(log.map((p, i) => [pts[i][0], pts[i][1], shortDate(p.d), eur(p.v)])));
+  return `<div class="vchart">
+    <p class="vchart-read"><b>${eur(log.at(-1).v)}</b>
+      <span class="${change >= 0 ? 'up' : 'down'}">${change >= 0 ? '+' : '−'}${eur(Math.abs(change))}</span>
+      dal ${shortDate(log[0].d)}</p>
+    <svg viewBox="0 0 ${W} ${H}" data-points="${data}" role="img"
+      aria-label="Valore della collezione dal ${shortDate(log[0].d)} al ${shortDate(log.at(-1).d)}">
+      <line class="grid" x1="0" x2="${W}" y1="${y(max).toFixed(1)}" y2="${y(max).toFixed(1)}"/>
+      <line class="grid" x1="0" x2="${W}" y1="${y(min).toFixed(1)}" y2="${y(min).toFixed(1)}"/>
+      <path class="area" d="${line}L${pts.at(-1)[0].toFixed(1)},${H}L${pts[0][0].toFixed(1)},${H}Z"/>
+      <path class="line" d="${line}"/>
+      <line class="cross" y1="0" y2="${H}" x1="-10" x2="-10"/>
+      <circle class="dot" r="5" cx="-10" cy="-10"/>
+    </svg>
+    <div class="vchart-axis"><small>${shortDate(log[0].d)}</small><small>max ${eur(max)} · min ${eur(min)}</small><small>${shortDate(log.at(-1).d)}</small></div>
+  </div>`;
+}
+
+// Toccando o scorrendo sul grafico si legge il punto più vicino.
+view.addEventListener('pointermove', e => {
+  const svg = e.target.closest?.('.vchart svg');
+  if (!svg) return;
+  const points = JSON.parse(svg.dataset.points);
+  const box = svg.getBoundingClientRect();
+  const px = (e.clientX - box.left) / box.width * svg.viewBox.baseVal.width;
+  const [cx, cy, date, value] = points.reduce((best, p) => Math.abs(p[0] - px) < Math.abs(best[0] - px) ? p : best);
+  svg.querySelector('.cross').setAttribute('x1', cx);
+  svg.querySelector('.cross').setAttribute('x2', cx);
+  svg.querySelector('.dot').setAttribute('cx', cx);
+  svg.querySelector('.dot').setAttribute('cy', cy);
+  svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
+});
+
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -1221,6 +1316,10 @@ async function importBackup(file, msg) {
     if (Array.isArray(data.albums) && data.albums.length) {   // backup dalla versione 2: anche gli album
       albums = data.albums;
       await saveAlbums(albums);
+    }
+    if (Array.isArray(data.valueLog) && data.valueLog.length > valueLog.length) {
+      valueLog = data.valueLog;
+      await db.put('settings', { key: 'valueLog', value: valueLog });
     }
     invalidateLayouts();
     autoBackup();
@@ -1431,6 +1530,11 @@ history.replaceState(null, '', location.pathname + location.search + '#/');
 
 for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 albums = await loadAlbums();
+valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
+if (coll.size) recordValue();
+if (coll.size && Date.now() - meta.get('pricesAt') > PRICE_REFRESH_EVERY) {
+  refreshPrices({ textContent: '' }).then(() => { if (location.hash === '#/stats') stats(); });
+}
 navigator.storage?.persist?.();
 // updateViaCache "none": il telefono controlla sempre sul server se il service worker è cambiato.
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
