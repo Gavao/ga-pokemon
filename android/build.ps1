@@ -34,6 +34,7 @@ New-Item -ItemType Directory -Force "$out\res\mipmap-xxxhdpi", "$out\gen", "$out
 
 # L'APK contiene solo il guscio: l'app web la carica da GitHub Pages (vedi MainActivity.java).
 Copy-Item "$root\icons\icon-192.png" "$out\res\mipmap-xxxhdpi\ic_launcher.png"
+Copy-Item "$PSScriptRoot\res\*" "$out\res" -Recurse -Force   # risorse fisse (es. regole del backup)
 
 # Versione dell'APK da android\version.txt (es. 1.1). Il codice interno parte da 1.000.000 perché
 # deve superare quello delle prime build (basato sulla data): Android rifiuta i codici più bassi.

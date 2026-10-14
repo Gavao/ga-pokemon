@@ -376,6 +376,34 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 .up { color: #5fd38d; }
 .down { color: var(--red); }
 
+/* Vendite e scambi */
+.copy .chip.deal { grid-column: 1 / -1; justify-self: start; font-size: 12px; padding: 5px 10px; }
+.dealform {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 10px;
+  margin: -4px 0 8px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+}
+.dealform input, .dealform select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.dealform label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.dealform .wide { grid-column: 1 / -1; }
+.dealform .primary { padding: 10px; }
+.deals { display: grid; gap: 6px; margin-top: 8px; }
+.deal-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--panel); border-radius: 12px; }
+.deal-row .info { flex: 1; min-width: 0; }
+.deal-row small { display: block; }
+
 /* Grafico del valore nel tempo */
 .vchart { background: var(--panel); border-radius: 12px; padding: 12px 12px 8px; }
 .vchart-read { margin: 0 0 6px; color: var(--muted); font-size: 13px; }

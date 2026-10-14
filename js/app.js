@@ -455,7 +455,7 @@ async function stats() {
   const names = new Map();
   try {
     for (const serie of await getCatalog())
-      for (const s of serie.sets) names.set(s.id, s);
+      for (const s of serie.sets) { names.set(s.id, s); setNames.set(s.id, s.name); }
   } catch { /* offline senza catalogo: si mostrano gli id */ }
 
   const bySet = new Map();
@@ -504,6 +504,7 @@ async function stats() {
     ${recs.length && !paidCount ? `<p class="note">Indica il prezzo pagato nella scheda di una carta
       (campo "Pagata €") per vedere quanto hai speso e quanto ci guadagni.</p>` : ''}
     ${recs.length ? `<h2>Valore nel tempo</h2>${valueChart(valueLog)}` : ''}
+    ${dealsSection()}
     ${recs.length ? `<p class="note">Valori: prezzo medio di vendita su Cardmarket (trend) per una copia
       in buone condizioni. Sono indicativi: lingua, condizione e gradazione possono cambiarli molto.</p>`
       : '<p class="empty">Non hai ancora aggiunto carte.<br>Apri un set e tocca + su una carta.</p>'}
@@ -808,7 +809,9 @@ async function album() {
 
     <h2>Doppioni</h2>
     ${doubles.length ? group('Copie in più, da scambiare', doubles,
-      ` · ${copiesOf(doubles) - doubles.length} in più`) : '<p class="note">Nessun doppione.</p>'}`;
+      ` · ${copiesOf(doubles) - doubles.length} in più`)
+      + '<div class="settings"><button class="chip" data-act="shareDoubles">Condividi la lista dei doppioni</button></div>'
+      : '<p class="note">Nessun doppione.</p>'}`;
 
   renderSpreads(cur, layout.rows.find(r => r.setId === albumSet));
 }
@@ -931,6 +934,7 @@ function more() {
 let cur = null;
 
 async function openCard(id) {
+  dealFor = null;
   cur = structuredClone(recFor(id));
   renderSheet();
   sheet.showModal();
@@ -966,9 +970,113 @@ function renderSheet() {
       <input data-f="grade" placeholder="Gradazione (es. PSA 10)" value="${esc(c.grade)}">
       <input data-f="paid" inputmode="decimal" placeholder="Pagata € (a copia)" value="${c.paid ?? ''}">
       <input data-f="note" class="wide" placeholder="Note" value="${esc(c.note)}">
-    </div>`).join('')}
+      ${dealFor === i ? '' : `<button class="chip deal" data-deal="${i}">Vendi, scambia o regala</button>`}
+    </div>
+    ${dealFor === i ? dealForm(c, i) : ''}`).join('')}
     <button class="primary" data-newcopy>+ Aggiungi copia</button>`;
   fillWhere();
+}
+
+// ---------------------------------------------------------------------------
+// Vendite, scambi e regali: tolgono la copia dalla collezione e restano nel registro
+// (nel database e nel backup), con incasso e guadagno rispetto al prezzo pagato.
+// ---------------------------------------------------------------------------
+let deals = [], dealFor = null;
+const DEAL_KINDS = { sold: 'Venduta', traded: 'Scambiata', gift: 'Regalata' };
+
+function dealForm(c, i) {
+  return `<div class="dealform" data-i="${i}">
+    <select id="dealKind">${options(Object.entries(DEAL_KINDS), 'sold')}</select>
+    <label>Copie <input id="dealQty" type="number" min="1" max="${c.qty}" value="1"></label>
+    <input id="dealPrice" inputmode="decimal" placeholder="Incassati € (in totale)">
+    <input id="dealWho" placeholder="Con chi">
+    <input id="dealNote" class="wide" placeholder="Note (es. cosa hai ricevuto in cambio)">
+    <button class="primary" data-deal-ok>Conferma</button>
+    <button class="chip" data-deal-cancel>Annulla</button>
+  </div>`;
+}
+
+async function saveDeals() {
+  meta.set('dirty', meta.get('dirty') + 1);
+  await db.put('settings', { key: 'deals', value: deals });
+  autoBackup();
+}
+
+async function confirmDeal(i) {
+  const c = cur.copies[i];
+  const n = Math.min(c.qty, Math.max(1, Math.round(+$('#dealQty').value || 1)));
+  const price = parseFloat($('#dealPrice').value.replace(',', '.'));
+  const kind = $('#dealKind').value;
+  deals.unshift({
+    id: Date.now(), date: new Date().toISOString().slice(0, 10), kind, qty: n,
+    cardId: cur.cardId, name: cur.name, setId: cur.setId, localId: cur.localId, image: cur.image,
+    variant: c.variant, condition: c.condition, lang: c.lang, paid: c.paid ?? null,
+    value: unitPrice(cur, c.variant), price: kind === 'sold' && price >= 0 ? price : null,
+    who: $('#dealWho').value.trim(), note: $('#dealNote').value.trim(),
+  });
+  c.qty -= n;
+  dealFor = null;
+  await saveDeals();
+  await save(cur);
+  toast(`${DEAL_KINDS[kind]}: ${esc(cur.name)} ×${n}. La trovi in Collezione → Vendite e scambi.`);
+}
+
+/** Annulla una vendita registrata per errore: la copia torna nella collezione. */
+async function undoDeal(id) {
+  const d = deals.find(x => x.id === id);
+  if (!d) return;
+  const rec = structuredClone(coll.get(d.cardId) ?? recFor(d.cardId));
+  Object.assign(rec, { name: rec.name ?? d.name, setId: rec.setId ?? d.setId, localId: rec.localId ?? d.localId, image: rec.image ?? d.image });
+  rec.copies.push({ variant: d.variant, qty: d.qty, condition: d.condition ?? 'NM', lang: d.lang ?? 'IT', grade: '', note: '', paid: d.paid });
+  deals.splice(deals.indexOf(d), 1);
+  await saveDeals();
+  await save(rec);
+}
+
+function dealsSection() {
+  if (!deals.length) return '';
+  const sold = deals.filter(d => d.kind === 'sold');
+  const cashed = sold.reduce((a, d) => a + (d.price ?? 0), 0);
+  const withCost = sold.filter(d => d.price != null && d.paid != null);
+  const gain = withCost.reduce((a, d) => a + d.price - d.paid * d.qty, 0);
+  return `<h2>Vendite e scambi</h2>
+    <div class="kpis">
+      <div><b>${eur(cashed)}</b><small>Incassato (${plural(sold.length, 'vendita', 'vendite')})</small></div>
+      <div><b class="${gain >= 0 ? 'up' : 'down'}">${gain >= 0 ? '+' : '−'}${eur(Math.abs(gain))}</b>
+        <small>Guadagno sul pagato${withCost.length < sold.length ? ` (${withCost.length} con prezzo pagato)` : ''}</small></div>
+    </div>
+    <div class="deals">${deals.slice(0, 50).map(d => `<div class="deal-row">
+      <span class="info"><b>${esc(d.name)}</b> <small>${esc(setNames.get(d.setId) ?? d.setId ?? '')} · N° ${esc(d.localId ?? '')} · ${esc(VARIANTS[d.variant] ?? d.variant)}</small>
+        <small>${shortDate(d.date)} · ${DEAL_KINDS[d.kind]} ×${d.qty}${d.price != null ? ' a ' + eur(d.price) : ''}${d.who ? ' · ' + esc(d.who) : ''}${d.note ? ' · ' + esc(d.note) : ''}</small></span>
+      <button class="icon" data-undo-deal="${d.id}" aria-label="Annulla e rimetti la copia nella collezione">↶</button>
+    </div>`).join('')}</div>`;
+}
+
+// Lista dei doppioni da mandare a chi scambia con te.
+async function shareDoubles() {
+  try { for (const serie of await getCatalog()) for (const s of serie.sets) setNames.set(s.id, s.name); } catch { /* offline */ }
+  const lines = [...coll.values()].filter(r => qty(r) > 1)
+    .sort((a, b) => (setNames.get(a.setId) ?? '').localeCompare(setNames.get(b.setId) ?? '') || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }))
+    .map(r => {
+      const v = unitPrice(r, bestCopy(r).variant);
+      return `• ${r.name} — ${setNames.get(r.setId) ?? r.setId} n° ${r.localId} ×${qty(r) - 1}${v ? ` (~${eur(v)})` : ''}`;
+    });
+  if (!lines.length) return toast('Non hai doppioni da condividere.');
+  shareText('Doppioni da scambiare', `I miei doppioni Pokémon da scambiare:\n\n${lines.join('\n')}`);
+}
+
+/** Condivisione di un testo: nell'APK il menu di Android, nel browser quello del telefono, altrimenti appunti. */
+async function shareText(title, text) {
+  if (native?.shareText) return native.shareText(title, text);
+  if (navigator.share) {
+    try { return await navigator.share({ title, text }); } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Testo copiato: incollalo dove vuoi (WhatsApp, email…).');
+  } catch {
+    toast('Condivisione non disponibile su questo dispositivo.');
+  }
 }
 
 // "Dove va": posto nell'album (o toploader) della carta aperta, con il pulsante per segnarla sistemata.
@@ -991,6 +1099,19 @@ sheet.addEventListener('click', async e => {
   if (!cur) return;
   if (e.target.closest('[data-mark-placed]')) {
     await markPlaced(cur);
+    return renderSheet();
+  }
+  const deal = e.target.closest('[data-deal]');
+  if (deal) {
+    dealFor = +deal.dataset.deal;
+    return renderSheet();
+  }
+  if (e.target.closest('[data-deal-cancel]')) {
+    dealFor = null;
+    return renderSheet();
+  }
+  if (e.target.closest('[data-deal-ok]')) {
+    await confirmDeal(+e.target.closest('.dealform').dataset.i);
     return renderSheet();
   }
   if (e.target.closest('[data-wish]')) cur.wish = !cur.wish;
@@ -1261,7 +1382,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -1321,6 +1442,10 @@ async function importBackup(file, msg) {
       valueLog = data.valueLog;
       await db.put('settings', { key: 'valueLog', value: valueLog });
     }
+    if (Array.isArray(data.deals) && data.deals.length > deals.length) {
+      deals = data.deals;
+      await db.put('settings', { key: 'deals', value: deals });
+    }
     invalidateLayouts();
     autoBackup();
     msg.textContent = `Carte importate: ${data.cards.length}.`;
@@ -1340,6 +1465,12 @@ view.addEventListener('click', async e => {
     setFilter = filter.dataset.filter;
     for (const c of view.querySelectorAll('[data-filter]')) c.classList.toggle('on', c === filter);
     return renderGrid();
+  }
+  const undo = e.target.closest('[data-undo-deal]');
+  if (undo) {
+    if (!confirm('Annullare questa operazione e rimettere la copia nella collezione?')) return;
+    await undoDeal(+undo.dataset.undoDeal);
+    return stats();
   }
   const placed = e.target.closest('[data-placed]');
   if (placed) {
@@ -1384,6 +1515,7 @@ view.addEventListener('click', async e => {
   const msg = $('#msg');
   if (act === 'prices') await refreshPrices(msg);
   if (act === 'scan') openScanner();
+  if (act === 'shareDoubles') shareDoubles();
   if (act === 'cost') {
     const btn = e.target.closest('[data-act]');
     btn.remove();
@@ -1531,6 +1663,7 @@ history.replaceState(null, '', location.pathname + location.search + '#/');
 for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 albums = await loadAlbums();
 valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
+deals = (await db.get('settings', 'deals'))?.value ?? [];
 if (coll.size) recordValue();
 if (coll.size && Date.now() - meta.get('pricesAt') > PRICE_REFRESH_EVERY) {
   refreshPrices({ textContent: '' }).then(() => { if (location.hash === '#/stats') stats(); });

@@ -213,6 +213,35 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> startUpdate(url));
         }
 
+        /** Condivide un testo con un'altra app (WhatsApp, email…), dal menu di condivisione di Android. */
+        @JavascriptInterface
+        public void shareText(String title, String text) {
+            Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain")
+                    .putExtra(Intent.EXTRA_SUBJECT, title).putExtra(Intent.EXTRA_TEXT, text);
+            runOnUiThread(() -> startActivity(Intent.createChooser(send, title)));
+        }
+
+        /**
+         * Salva un file di testo (es. l'esportazione per Excel) in Download/GAPokemon e restituisce il
+         * percorso, oppure una stringa vuota se non riesce.
+         */
+        @JavascriptInterface
+        public String saveFile(String name, String mime, String content) {
+            try {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, BACKUP_DIR);
+                Uri target = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                try (OutputStream out = getContentResolver().openOutputStream(target, "wt")) {
+                    out.write(content.getBytes(StandardCharsets.UTF_8));
+                }
+                return "Download/GAPokemon/" + name;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
         /**
          * Scrive la copia di sicurezza in Download/GAPokemon, una cartella che resta anche se
          * l'app viene disinstallata. Restituisce il percorso, oppure una stringa vuota se fallisce.
