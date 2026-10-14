@@ -330,7 +330,7 @@ async function home() {
   catalog = await getCatalog();
   for (const serie of catalog) for (const s of serie.sets) setNames.set(s.id, s.name);
   const dirty = meta.get('dirty');
-  view.innerHTML = `<header class="top"><h1>GA Pokémon</h1>
+  view.innerHTML = `<header class="top"><span class="spacer"></span>
       <button class="chip" data-act="pack">Bustina</button>
       <button class="chip on" data-act="scan">Scansiona</button></header>
     <div id="updateSlot">${updateBanner()}</div>

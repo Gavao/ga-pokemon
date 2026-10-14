@@ -760,3 +760,5 @@ h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
   color: var(--accent-ink);
   font-weight: 700;
 }
+
+.top .spacer { flex: 1; }
