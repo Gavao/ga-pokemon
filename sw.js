@@ -3,7 +3,7 @@ const SHELL = 'shell-v1';
 const IMAGES = 'images-v1';
 const FILES = [
   './', 'index.html', 'css/style.css',
-  'js/app.js', 'js/db.js', 'js/api.js', 'js/logos.js', 'js/images.js', 'js/scan.js',
+  'js/app.js', 'js/db.js', 'js/api.js', 'js/logos.js', 'js/images.js', 'js/scan.js', 'js/version.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
@@ -18,9 +18,11 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
   // File dell'app: prima la rete (così le modifiche si vedono subito), poi la copia salvata.
+  // "no-cache" chiede sempre al server se il file è cambiato: senza, il telefono poteva riusare
+  // per 10 minuti la copia vecchia anche con una versione nuova già pubblicata.
   if (url.origin === location.origin) {
     e.respondWith(
-      fetch(e.request).then(res => {
+      fetch(url.href, { cache: 'no-cache', credentials: 'same-origin' }).then(res => {
         if (res.ok) caches.open(SHELL).then(c => c.put(e.request, res.clone()));
         return res.clone();
       }).catch(() => caches.match(e.request, { ignoreSearch: true }))

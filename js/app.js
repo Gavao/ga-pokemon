@@ -2,6 +2,7 @@ import { db } from './db.js';
 import { getCatalog, getSet, getCard, searchCards } from './api.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
+import { APP_VERSION } from './version.js';
 import { captureFromVideo, canvasFromFile, readCard, findCards, parseNumber } from './scan.js';
 
 // ---------------------------------------------------------------------------
@@ -665,7 +666,7 @@ function more() {
       <input type="file" id="file" accept="application/json,text/plain,.json,.txt" hidden>
     </div>
     ${native ? `<h2>App</h2>
-    <p class="note">Versione installata: ${esc(apkVersion())}</p>
+    <p class="note">Versione installata: ${esc(apkVersion())} · contenuti: ${esc(APP_VERSION)}</p>
     <div class="list"><button data-act="checkUpdate">Controlla aggiornamenti</button></div>` : ''}
     <h2>Manutenzione</h2>
     <div class="list">
@@ -1087,6 +1088,20 @@ view.addEventListener('toggle', e => {
   else openSeries.delete(id);
 }, true);
 
+// Nuova versione pubblicata (version.txt diverso da quella caricata): si ricarica l'app, così la
+// modifica arriva anche se l'app era rimasta aperta in secondo piano. Mai con una scheda o la
+// fotocamera aperte, e una sola volta per versione (se qualcosa va storto non si entra in un ciclo).
+async function checkWebUpdate() {
+  if (APP_VERSION === 'dev') return;
+  try {
+    const latest = (await (await fetch('version.txt', { cache: 'no-store' })).text()).trim();
+    if (!latest || latest === APP_VERSION || sheet.open || scanner.open) return;
+    if (sessionStorage.getItem('reloadedFor') === latest) return;
+    sessionStorage.setItem('reloadedFor', latest);
+    location.reload();
+  } catch { /* offline: si riprova al prossimo ritorno */ }
+}
+
 // Se l'app resta in secondo piano più di qualche minuto, al ritorno riparte da capo come appena
 // aperta: schermata iniziale, serie chiuse, ricerca vuota. Le uscite brevi (fotocamera, scelta
 // di un file, un messaggio) invece non toccano nulla.
@@ -1097,6 +1112,7 @@ document.addEventListener('visibilitychange', () => {
     hiddenAt = Date.now();
     return;
   }
+  checkWebUpdate();
   if (!hiddenAt || Date.now() - hiddenAt < RESET_AFTER) return;
   openSeries.clear();
   scrollPos.clear();
@@ -1115,6 +1131,8 @@ history.replaceState(null, '', location.pathname + location.search + '#/');
 
 for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 navigator.storage?.persist?.();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+// updateViaCache "none": il telefono controlla sempre sul server se il service worker è cambiato.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
 route();
 checkApkUpdate();
+checkWebUpdate();

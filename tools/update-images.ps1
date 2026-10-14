@@ -77,12 +77,16 @@ foreach ($id in $setIds) {
       foreach ($c in (Invoke-RestMethod "$api/en/sets/$([uri]::EscapeDataString($id))").cards) { if (-not $itIds[$c.id]) { $cards += $c } }
     } catch { }
   }
-  foreach ($c in $cards) { if (-not $c.image -and $en[$c.localId]) { $c | Add-Member -Force image $en[$c.localId] } }
+  # Come fa l'app: se manca l'immagine italiana si usa quella inglese (segnata, per cercare comunque
+  # prima una versione italiana).
+  foreach ($c in $cards) {
+    if (-not $c.image -and $en[$c.localId]) { $c | Add-Member -Force image $en[$c.localId]; $c | Add-Member -Force fromEn $true }
+  }
 
-  # Carte senza immagine, o con un'immagine dichiarata che sul server non c'è.
+  # Carte senza immagine, con un'immagine dichiarata che sul server non c'è, o solo in inglese.
   $primary = @($cards | Where-Object image | ForEach-Object { "$($_.image)/low.webp" })
   $alive = if ($primary.Count) { Test-Urls $primary } else { @{} }
-  $missing = @($cards | Where-Object { -not $_.image -or -not $alive["$($_.image)/low.webp"] })
+  $missing = @($cards | Where-Object { -not $_.image -or -not $alive["$($_.image)/low.webp"] -or $_.fromEn })
   if (-not $missing.Count) { continue }
 
   $code = $set.abbreviation.official
@@ -99,6 +103,9 @@ foreach ($id in $setIds) {
       $candidate = "$limitless/$code/${code}_$($digits.PadLeft(3, '0'))_R_IT_SM.png"
       if (Test-Url $candidate) { $url = $candidate; $count.it++ }
     }
+    # Senza versione italiana, una carta che ha già un'immagine inglese funzionante va bene così:
+    # l'app la prende da sola dall'elenco inglese, non serve scriverla qui.
+    if (-not $url -and $c.fromEn -and $alive["$($c.image)/low.webp"]) { $count.en++; continue }
     $enUrl = $en[$c.localId]
     if (-not $url -and $enUrl -and $enUrl -ne $c.image -and (Test-Url "$enUrl/low.webp")) { $url = $enUrl; $count.en++ }
     if (-not $url) {
