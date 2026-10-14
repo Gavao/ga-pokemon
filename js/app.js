@@ -799,7 +799,18 @@ async function album() {
   const inAlbum = new Set(albums.flatMap(a => a.sets ?? []));
   const addable = order.filter(id => !inAlbum.has(id));
   const homeless = [...owned.keys()].filter(id => !inAlbum.has(id));
-  const todo = await toPlace();
+  // Da sistemare: ogni album mostra solo le sue carte; i toploader hanno una lista a parte.
+  const todoAll = await toPlace();
+  const todo = todoAll.filter(t => t.p.album?.id === cur.id);
+  const todoTl = todoAll.filter(t => t.p.kind === 'toploader');
+  const pendingIn = a => todoAll.filter(t => t.p.album?.id === a.id).length;
+  const todoRows = list => `<div class="todo">${list.slice(0, todoLimit).map(({ rec, p }) => `<div class="todo-row">
+        <div class="thumb" data-card="${esc(rec.cardId)}">${cardImg(rec.cardId, rec.image, 'low')}</div>
+        <span class="info"><b>${esc(rec.name)}</b><small>${esc(setName(rec.setId))} · N° ${esc(rec.localId)}</small>
+          <small class="place">${esc(p.text)}</small></span>
+        <button class="chip" data-placed="${esc(rec.cardId)}">Fatto</button>
+      </div>`).join('')}</div>
+      ${list.length > todoLimit ? `<div class="settings"><button class="chip" data-album-act="more">Mostra tutte (${list.length})</button></div>` : ''}`;
 
   const tiers = { toploader: [], sleeve: [], album: [] };
   for (const r of recs) tiers[protectionOf(r)].push(r);
@@ -812,23 +823,17 @@ async function album() {
 
   view.innerHTML = `<header class="top"><h1>Album</h1></header>
     <div class="chips albums">
-      ${albums.map(a => `<button class="chip ${a.id === cur.id ? 'on' : ''}" data-album-act="pick" data-album-id="${esc(a.id)}">${esc(a.name)}</button>`).join('')}
+      ${albums.map(a => `<button class="chip ${a.id === cur.id ? 'on' : ''}" data-album-act="pick" data-album-id="${esc(a.id)}">${esc(a.name)}${pendingIn(a) ? ` · ${pendingIn(a)}` : ''}</button>`).join('')}
       <button class="chip" data-album-act="new">+ Nuovo album</button>
       ${dexAlbum() ? '' : '<button class="chip" data-album-act="newDex">+ Album Pokédex</button>'}
     </div>
 
-    <h2>Da sistemare ${todo.length ? `<span class="count">${todo.length}</span>` : ''}</h2>
+    <h2>Da sistemare in ${esc(cur.name)} ${todo.length ? `<span class="count">${todo.length}</span>` : ''}</h2>
     ${todo.length ? `<p class="note">Carte aggiunte che non hai ancora messo al loro posto: sistemale e tocca Fatto.</p>
-      <div class="todo">${todo.slice(0, todoLimit).map(({ rec, p }) => `<div class="todo-row">
-        <div class="thumb" data-card="${esc(rec.cardId)}">${cardImg(rec.cardId, rec.image, 'low')}</div>
-        <span class="info"><b>${esc(rec.name)}</b><small>${esc(setName(rec.setId))} · N° ${esc(rec.localId)}</small>
-          <small class="place">${esc(p.text)}</small></span>
-        <button class="chip" data-placed="${esc(rec.cardId)}">Fatto</button>
-      </div>`).join('')}</div>
-      <div class="settings">
-        ${todo.length > todoLimit ? `<button class="chip" data-album-act="more">Mostra tutte (${todo.length})</button>` : ''}
-        <button class="chip" data-album-act="allPlaced">Segna tutte come sistemate</button>
-      </div>` : '<p class="note">Tutto al suo posto.</p>'}
+      ${todoRows(todo)}
+      <div class="settings"><button class="chip" data-album-act="allPlaced">Segna tutte come sistemate</button></div>`
+      : `<p class="note">In ${esc(cur.name)} è tutto al suo posto.</p>`}
+    ${todoTl.length ? `<h2>Da mettere nel toploader <span class="count">${todoTl.length}</span></h2>${todoRows(todoTl)}` : ''}
     ${homeless.length ? `<p class="note warnline">Set di cui hai carte ma che non sono in nessun album:
       ${homeless.map(id => esc(setName(id))).join(', ')}. Aggiungili a un album qui sotto.</p>` : ''}
 
@@ -2279,7 +2284,7 @@ view.addEventListener('click', async e => {
     if (what === 'allPlaced') {
       if (!confirm('Segnare tutte le carte come già sistemate al loro posto?')) return;
       albumAct.disabled = true;
-      for (const { rec } of await toPlace()) await markPlaced(rec);
+      for (const { rec } of (await toPlace()).filter(t => t.p.album?.id === currentAlbum)) await markPlaced(rec);
     }
     if (['up', 'down', 'remove', 'add', 'new', 'newDex', 'delete'].includes(what)) await persistAlbums();
     return album();
