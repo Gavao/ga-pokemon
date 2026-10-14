@@ -1244,9 +1244,14 @@ async function more() {
     <div class="list">
       ${shareFile() ? '<button data-act="share">Salva backup su Drive, email o altra app</button>' : ''}
       <button data-act="export">${native ? 'Salva adesso la copia di sicurezza' : 'Scarica backup come file'}</button>
+      ${native ? '<button data-act="drive">Invia il backup a Google Drive (o altra app)</button>' : ''}
       <button data-act="import">Ripristina da un backup</button>
+      <button data-act="csv">Esporta la collezione per Excel</button>
       <input type="file" id="file" accept="application/json,text/plain,.json,.txt" hidden>
     </div>
+    ${native ? `<p class="note">Backup automatico su Google Drive: se nel telefono è attivo il backup Google
+      (Impostazioni → Google → Backup), Android salva da solo anche i dati di GA Pokémon e li ripristina
+      quando reinstalli l'app o cambi telefono con lo stesso account.</p>` : ''}
     ${native ? `<h2>App</h2>
     <p class="note">Versione installata: ${esc(apkVersion())} · contenuti: ${esc(APP_VERSION)}</p>
     <div class="list"><button data-act="checkUpdate">Controlla aggiornamenti</button></div>` : ''}
@@ -2018,6 +2023,43 @@ function exportBackup(msg) {
   backupDone();
 }
 
+// Esportazione per Excel: una riga per ogni gruppo di copie (CSV con ";" e BOM, come lo vuole Excel in italiano).
+async function exportCsv(msg) {
+  const names = await catalogNames();
+  const cell = v => {
+    const s = String(v ?? '');
+    return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const num = n => (n == null || n === '' ? '' : String(Math.round(n * 100) / 100).replace('.', ','));
+  const rows = [['Set', 'Numero', 'Nome', 'Rarità', 'Variante', 'Condizione', 'Lingua', 'Gradazione', 'Copie',
+    'Pagata € (a copia)', 'Valore € (a copia)', 'Valore € (totale)', 'Note', 'Wishlist']];
+  const recs = [...coll.values()].sort((a, b) => (names.get(a.setId)?.name ?? '').localeCompare(names.get(b.setId)?.name ?? '')
+    || String(a.localId).localeCompare(String(b.localId), undefined, { numeric: true }));
+  for (const r of recs) {
+    const base = [names.get(r.setId)?.name ?? r.setId, r.localId, r.name, rarityLabel(r.rarity)];
+    if (!r.copies.length) rows.push([...base, '', '', '', '', 0, '', '', '', '', r.wish ? 'sì' : '']);
+    for (const c of r.copies) {
+      const unit = unitPrice(r, c.variant);
+      rows.push([...base, VARIANTS[c.variant] ?? c.variant, c.condition, c.lang, c.grade, c.qty,
+        num(c.paid), num(unit), num(unit * c.qty), c.note, r.wish ? 'sì' : '']);
+    }
+  }
+  const csv = '﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n');
+  const name = `ga-pokemon-collezione-${new Date().toISOString().slice(0, 10)}.csv`;
+  if (native?.shareFile) {
+    if (!native.shareFile(name, 'text/csv', csv)) msg.textContent = 'Esportazione non riuscita.';
+  } else if (native?.saveFile) {
+    const path = native.saveFile(name, 'text/csv', csv);
+    msg.textContent = path ? `File salvato in ${path}: aprilo con Excel o Fogli Google.` : 'Esportazione non riuscita.';
+  } else {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+}
+
 async function importBackup(file, msg) {
   try {
     const data = JSON.parse(await file.text());
@@ -2137,6 +2179,12 @@ view.addEventListener('click', async e => {
     return stats();
   }
   if (act === 'pack') openPackDialog();
+  if (act === 'drive') {
+    if (!native.shareBackup) msg.textContent = 'Aggiorna l\'app alla versione 1.4 (Altro → Controlla aggiornamenti) per inviare il backup a Drive.';
+    else if (native.shareBackup(backupJson())) backupDone();
+    else msg.textContent = 'Invio non riuscito.';
+  }
+  if (act === 'csv') exportCsv(msg);
   if (act === 'offline') downloadSets([$('#offSet').value], $('#offPrices').checked);
   if (act === 'offlineMine') {
     const mine = [...ownedBySet().keys()];

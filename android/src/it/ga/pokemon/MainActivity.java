@@ -28,6 +28,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -249,28 +250,75 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public String saveBackup(String json) {
             try {
-                ContentResolver resolver = getContentResolver();
-                Uri downloads = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
-                Uri target = null;
-                try (Cursor c = resolver.query(downloads, new String[]{MediaStore.MediaColumns._ID},
-                        MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
-                        new String[]{BACKUP_NAME, "%GAPokemon%"}, null)) {
-                    if (c != null && c.moveToFirst()) target = ContentUris.withAppendedId(downloads, c.getLong(0));
-                }
-                if (target == null) {
-                    ContentValues values = new ContentValues();
-                    values.put(MediaStore.MediaColumns.DISPLAY_NAME, BACKUP_NAME);
-                    values.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
-                    values.put(MediaStore.MediaColumns.RELATIVE_PATH, BACKUP_DIR);
-                    target = resolver.insert(downloads, values);
-                }
-                try (OutputStream out = resolver.openOutputStream(target, "wt")) {
-                    out.write(json.getBytes(StandardCharsets.UTF_8));
-                }
+                writeBackup(json);
                 return "Download/GAPokemon/" + BACKUP_NAME;
             } catch (Exception e) {
                 return "";
             }
         }
+
+        /**
+         * Aggiorna la copia di sicurezza e la passa al menu di condivisione di Android: da lì si sceglie
+         * "Salva su Drive" (o email, WhatsApp…). Restituisce false se non riesce.
+         */
+        @JavascriptInterface
+        public boolean shareBackup(String json) {
+            try {
+                share(writeBackup(json), "application/json", "Backup GA Pokémon");
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        /** Salva un file in Download/GAPokemon (es. l'esportazione per Excel) e lo passa al menu di condivisione. */
+        @JavascriptInterface
+        public boolean shareFile(String name, String mime, String content) {
+            try {
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, BACKUP_DIR);
+                Uri target = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                try (OutputStream out = getContentResolver().openOutputStream(target, "wt")) {
+                    out.write(content.getBytes(StandardCharsets.UTF_8));
+                }
+                share(target, mime, name);
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+    }
+
+    /** Scrive (o sovrascrive) la copia di sicurezza in Download/GAPokemon e ne restituisce l'indirizzo. */
+    private Uri writeBackup(String json) throws IOException {
+        ContentResolver resolver = getContentResolver();
+        Uri downloads = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        Uri target = null;
+        try (Cursor c = resolver.query(downloads, new String[]{MediaStore.MediaColumns._ID},
+                MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
+                new String[]{BACKUP_NAME, "%GAPokemon%"}, null)) {
+            if (c != null && c.moveToFirst()) target = ContentUris.withAppendedId(downloads, c.getLong(0));
+        }
+        if (target == null) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, BACKUP_NAME);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, BACKUP_DIR);
+            target = resolver.insert(downloads, values);
+        }
+        try (OutputStream out = resolver.openOutputStream(target, "wt")) {
+            out.write(json.getBytes(StandardCharsets.UTF_8));
+        }
+        return target;
+    }
+
+    private void share(Uri uri, String mime, String title) {
+        Intent send = new Intent(Intent.ACTION_SEND).setType(mime)
+                .putExtra(Intent.EXTRA_STREAM, uri).putExtra(Intent.EXTRA_SUBJECT, title)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        runOnUiThread(() -> startActivity(Intent.createChooser(send, title)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)));
     }
 }
