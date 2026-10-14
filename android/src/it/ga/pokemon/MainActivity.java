@@ -90,7 +90,6 @@ public class MainActivity extends Activity {
 
         web.loadUrl(HOME);
     }
-    }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {

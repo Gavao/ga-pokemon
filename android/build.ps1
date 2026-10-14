@@ -19,7 +19,7 @@ $props = Join-Path $PSScriptRoot 'keystore.properties'
 if (-not (Test-Path $props)) {
   "storePassword=$([guid]::NewGuid().ToString('N'))" | Set-Content $props -Encoding ascii
 }
-$storePass = ((Get-Content $props) -match '^storePassword=' -replace '^storePassword=', '').Trim()
+$storePass = (@(Get-Content $props) -match '^storePassword=' | Select-Object -First 1).Substring('storePassword='.Length).Trim()
 
 function Step($name, [scriptblock]$cmd) {
   Write-Host "== $name"
