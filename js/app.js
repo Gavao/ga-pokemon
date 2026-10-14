@@ -95,6 +95,41 @@ function autoBackup() {
   }, 1500);
 }
 
+// Aggiornamenti dell'APK: all'avvio si confronta la versione installata con l'ultima release
+// su GitHub; se ce n'è una più nuova compare un avviso e l'APK la scarica e la installa.
+// (Il contenuto dell'app invece si aggiorna da solo, arriva da GitHub Pages.)
+const RELEASES = 'https://api.github.com/repos/Gavao/ga-pokemon/releases/latest';
+let apkUpdate = null;   // { version, url } se c'è un APK più nuovo
+const apkVersion = () => native && (native.appVersion ? native.appVersion() : '1.0');
+
+function isNewer(a, b) {
+  const x = a.split('.').map(Number), y = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++)
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  return false;
+}
+
+async function checkApkUpdate() {
+  if (!native) return;
+  try {
+    const rel = await (await fetch(RELEASES)).json();
+    const version = rel.tag_name.replace(/^v/, '');
+    const asset = rel.assets.find(a => a.name.endsWith('.apk'));
+    apkUpdate = asset && isNewer(version, apkVersion()) ? { version, url: asset.browser_download_url } : null;
+  } catch { /* offline o GitHub non raggiungibile: si riprova al prossimo avvio */ }
+  const slot = $('#updateSlot');
+  if (slot) slot.innerHTML = updateBanner();
+}
+
+function updateBanner() {
+  if (!apkUpdate) return '';
+  // Il primo APK (1.0) non sa ancora aggiornarsi da solo: va scaricato a mano un'ultima volta.
+  return native.installUpdate
+    ? `<button class="warn" data-act="update">È disponibile la versione ${esc(apkUpdate.version)} dell'app. Tocca per aggiornare.</button>`
+    : `<p class="warn">È disponibile la versione ${esc(apkUpdate.version)} dell'app: scaricala da GitHub
+        (github.com/Gavao/ga-pokemon, sezione Releases) e installala sopra a questa.</p>`;
+}
+
 async function save(rec) {
   meta.set('dirty', meta.get('dirty') + 1);
   autoBackup();
@@ -186,6 +221,7 @@ async function home() {
   for (const serie of catalog) for (const s of serie.sets) setNames.set(s.id, s.name);
   const dirty = meta.get('dirty');
   view.innerHTML = `<header class="top"><h1>GA Pokémon</h1></header>
+    <div id="updateSlot">${updateBanner()}</div>
     ${!native && coll.size && dirty >= BACKUP_REMINDER
       ? `<a class="warn" href="#/more">${dirty} modifiche non ancora salvate in un backup. Tocca per salvarle.</a>` : ''}
     <div class="tools"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}"></div>
@@ -344,6 +380,9 @@ function more() {
       <button data-act="import">Ripristina da un backup</button>
       <input type="file" id="file" accept="application/json,text/plain,.json,.txt" hidden>
     </div>
+    ${native ? `<h2>App</h2>
+    <p class="note">Versione installata: ${esc(apkVersion())}</p>
+    <div class="list"><button data-act="checkUpdate">Controlla aggiornamenti</button></div>` : ''}
     <h2>Manutenzione</h2>
     <div class="list">
       <button data-act="prices">Aggiorna i prezzi della collezione</button>
@@ -557,6 +596,19 @@ view.addEventListener('click', async e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
   const msg = $('#msg');
   if (act === 'prices') await refreshPrices(msg);
+  if (act === 'update') {
+    const button = e.target.closest('[data-act]');
+    button.removeAttribute('data-act');   // un solo download anche con più tocchi
+    setTimeout(() => button.setAttribute('data-act', 'update'), 10000);
+    native.installUpdate(apkUpdate.url);
+    button.textContent = 'Download in corso: al termine si apre l\'installazione. '
+      + 'Se Android chiede il permesso di installare app, attivalo e tocca di nuovo qui.';
+  }
+  if (act === 'checkUpdate') {
+    msg.textContent = 'Controllo in corso…';
+    await checkApkUpdate();
+    msg.innerHTML = apkUpdate ? updateBanner() : 'Hai già l\'ultima versione.';
+  }
   if (act === 'share') await shareBackup(msg);
   if (act === 'export') exportBackup(msg);
   if (act === 'import') $('#file').click();
@@ -629,3 +681,4 @@ for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 navigator.storage?.persist?.();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 route();
+checkApkUpdate();

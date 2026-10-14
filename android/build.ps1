@@ -2,7 +2,9 @@
 # Va rilanciato solo quando cambia la parte Android; le modifiche all'app web basta pubblicarle.
 # Uso:  powershell -ExecutionPolicy Bypass -File android\build.ps1
 # Richiede JDK e Android SDK in C:\Users\gavossa\android-build (vedi $tools).
-param([string]$tools = 'C:\Users\gavossa\android-build')
+# Con -Release pubblica anche l'APK come nuova release su GitHub: l'app sul telefono la trova
+# da sola e propone l'aggiornamento. Prima aumenta il numero in android\version.txt.
+param([string]$tools = 'C:\Users\gavossa\android-build', [switch]$Release)
 
 $root = Split-Path $PSScriptRoot -Parent
 $out = Join-Path $PSScriptRoot 'build'
@@ -33,9 +35,11 @@ New-Item -ItemType Directory -Force "$out\res\mipmap-xxxhdpi", "$out\gen", "$out
 # L'APK contiene solo il guscio: l'app web la carica da GitHub Pages (vedi MainActivity.java).
 Copy-Item "$root\icons\icon-192.png" "$out\res\mipmap-xxxhdpi\ic_launcher.png"
 
-# Il numero di versione cresce da solo a ogni build, così Android la vede come aggiornamento.
-$versionCode = [int]((Get-Date) - (Get-Date '2026-01-01')).TotalMinutes
-$versionName = Get-Date -Format 'yyyy.MM.dd-HHmm'
+# Versione dell'APK da android\version.txt (es. 1.1). Il codice interno parte da 1.000.000 perché
+# deve superare quello delle prime build (basato sulla data): Android rifiuta i codici più bassi.
+$versionName = (Get-Content "$PSScriptRoot\version.txt" -TotalCount 1).Trim()
+$major, $minor = $versionName.Split('.') | ForEach-Object { [int]$_ }
+$versionCode = 1000000 + $major * 1000 + $minor
 
 if (-not (Test-Path $keystore)) {
   Step 'Creazione chiave di firma' {
@@ -64,4 +68,13 @@ Step 'Firma' {
 Step 'Verifica' { & "$bt\apksigner.bat" verify $apk }
 Remove-Item "$apk.idsig" -ErrorAction SilentlyContinue   # sottoprodotto della firma, non serve per installare
 
-"APK pronto: $apk  ($([math]::Round((Get-Item $apk).Length / 1MB, 1)) MB, versione $versionName)"
+"APK pronto: $apk  ($([math]::Round((Get-Item $apk).Length / 1KB)) KB, versione $versionName)"
+
+if ($Release) {
+  $gh = (Get-Command gh -ErrorAction SilentlyContinue).Source
+  if (-not $gh) { $gh = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe" }
+  Step 'Pubblicazione su GitHub' {
+    & $gh release create "v$versionName" $apk --repo Gavao/ga-pokemon --title "GA Pokémon $versionName" `
+      --notes "Aggiornamento del guscio Android. Dall'app: avviso nella schermata iniziale, tocca Aggiorna."
+  }
+}

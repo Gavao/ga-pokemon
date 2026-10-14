@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="it.ga.pokemon">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Serve per installare gli aggiornamenti dell'app scaricati da GitHub -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:label="GA Pokémon"

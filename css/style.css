@@ -67,6 +67,8 @@ h2 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: u
   font-size: 13px;
 }
 
+button.warn { width: 100%; background: none; text-align: left; font: inherit; font-size: 13px; }
+
 /* Espansioni */
 .serie { background: var(--panel); border-radius: 12px; margin-bottom: 10px; overflow: hidden; }
 .serie summary {
