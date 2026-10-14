@@ -528,7 +528,40 @@ function protectionOf(rec) {
   return 'album';
 }
 
-let albumSet = '', albumPockets = 9, albumGaps = true;
+// Il mio album: capienza, tasche per facciata e set che ci vanno, in ordine. Ricordato sul dispositivo.
+const ALBUM_KEY = 'albumConfig';
+function albumConfig() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(ALBUM_KEY)); } catch { /* memoria non disponibile */ }
+  return { capacity: 432, perSide: 9, gaps: true, newSide: true, sets: null, ...saved };
+}
+function saveAlbumConfig(cfg) {
+  try { localStorage.setItem(ALBUM_KEY, JSON.stringify(cfg)); } catch { /* memoria non disponibile */ }
+}
+
+/**
+ * Dove va ogni set nell'album: tasche occupate e facciate da/a. Con "newSide" ogni set parte su una
+ * facciata nuova; con "gaps" si contano anche le carte che mancano (il loro posto resta libero).
+ */
+function albumPlan(cfg, names, owned) {
+  const totalSides = Math.floor(cfg.capacity / cfg.perSide);
+  let pos = 0;
+  const rows = cfg.sets.map(id => {
+    const cards = cfg.gaps ? (names.get(id)?.cardCount.total ?? 0) : (owned.get(id) ?? 0);
+    if (cfg.newSide) pos = Math.ceil(pos / cfg.perSide) * cfg.perSide;
+    const start = pos;
+    pos += cards;
+    const firstSide = Math.floor(start / cfg.perSide) + 1;
+    const lastSide = Math.floor((pos - 1) / cfg.perSide) + 1;
+    return { id, cards, start, firstSide, lastSide, fits: pos <= totalSides * cfg.perSide };
+  });
+  const usedSides = rows.length ? Math.ceil(pos / cfg.perSide) : 0;
+  return { rows, totalSides, usedSides, overflow: Math.max(0, pos - totalSides * cfg.perSide) };
+}
+
+const sideLabel = n => `Facciata ${n} · foglio ${Math.ceil(n / 2)} ${n % 2 ? 'fronte' : 'retro'}`;
+
+let albumSet = '';
 
 async function album() {
   const recs = [...coll.values()].filter(qty);
@@ -537,25 +570,76 @@ async function album() {
       <p class="empty">Aggiungi qualche carta alla collezione:<br>qui ti aiuto a sistemarle.</p>`;
     return;
   }
-  const names = new Map();
+  const names = new Map(), order = [];
   try {
-    for (const serie of await getCatalog()) for (const s of serie.sets) names.set(s.id, s);
+    for (const serie of await getCatalog()) for (const s of serie.sets) { names.set(s.id, s); order.push(s.id); }
   } catch { /* offline */ }
   const owned = ownedBySet();
-  const sets = [...owned.keys()].sort((a, b) => (names.get(a)?.name ?? a).localeCompare(names.get(b)?.name ?? b));
-  if (!owned.has(albumSet)) albumSet = sets[0];
+  const ownedSets = [...owned.keys()].sort((a, b) => (names.get(a)?.name ?? a).localeCompare(names.get(b)?.name ?? b));
+
+  // Prima volta: nell'album i set di cui hai carte, dal più vecchio al più recente.
+  const cfg = albumConfig();
+  if (!cfg.sets) {
+    cfg.sets = [...owned.keys()].sort((a, b) => order.indexOf(b) - order.indexOf(a));
+    saveAlbumConfig(cfg);
+  }
+  const plan = albumPlan(cfg, names, owned);
+  if (!cfg.sets.includes(albumSet)) albumSet = cfg.sets[0] ?? '';
+  const setName = id => names.get(id)?.name ?? id;
+  const addable = order.filter(id => !cfg.sets.includes(id));
 
   const tiers = { toploader: [], sleeve: [], album: [] };
   for (const r of recs) tiers[protectionOf(r)].push(r);
   const copiesOf = list => list.reduce((a, r) => a + qty(r), 0);
   const doubles = recs.filter(r => qty(r) > 1);
 
-  const toComplete = sets.map(id => {
+  const toComplete = ownedSets.map(id => {
     const tot = names.get(id)?.cardCount.total ?? 0;
     return { id, n: owned.get(id), tot, pct: tot ? owned.get(id) / tot : 0 };
   }).sort((a, b) => b.pct - a.pct);
 
   view.innerHTML = `<header class="top"><h1>Album</h1></header>
+
+    <h2>Il mio album</h2>
+    <div class="settings">
+      <label>Tasche totali <input type="number" min="4" step="1" data-album="capacity" value="${cfg.capacity}"></label>
+      <select data-album="perSide">${options([[4, '4 per facciata (2×2)'], [9, '9 per facciata (3×3)'], [12, '12 per facciata (3×4)']], cfg.perSide)}</select>
+      <label><input type="checkbox" data-album="newSide" ${cfg.newSide ? 'checked' : ''}> Ogni set su una facciata nuova</label>
+      <label><input type="checkbox" data-album="gaps" ${cfg.gaps ? 'checked' : ''}> Lascia i posti per le mancanti</label>
+    </div>
+    <p class="note">${plural(plan.totalSides, 'facciata', 'facciate')} da ${cfg.perSide} tasche
+      (${plural(Math.ceil(plan.totalSides / 2), 'foglio', 'fogli')} fronte e retro) ·
+      ${plural(Math.min(plan.usedSides, plan.totalSides), 'occupata', 'occupate')} ·
+      ${plan.overflow ? `<b class="bad">non entra tutto: mancano ${plural(plan.overflow, 'tasca', 'tasche')}</b>`
+        : `libere ${plan.totalSides - plan.usedSides} (${(plan.totalSides - plan.usedSides) * cfg.perSide} tasche)`}</p>
+    ${bar(Math.min(plan.usedSides, plan.totalSides), plan.totalSides)}
+    <div class="albumsets">
+      ${plan.rows.map((r, i) => `<div class="setrow ${r.fits ? '' : 'over'}">
+        <span class="logo">${names.has(r.id) ? setLogo(names.get(r.id)) : ''}</span>
+        <span class="info"><b>${esc(setName(r.id))}</b>
+          <small>${plural(r.cards, 'tasca', 'tasche')} · ${r.fits
+            ? (r.firstSide === r.lastSide ? `facciata ${r.firstSide}` : `facciate ${r.firstSide}–${r.lastSide}`)
+            : 'non entra in questo album'}</small></span>
+        <span class="order">
+          <button class="icon" data-album-act="up" data-set="${esc(r.id)}" ${i ? '' : 'disabled'} aria-label="Sposta su">↑</button>
+          <button class="icon" data-album-act="down" data-set="${esc(r.id)}" ${i < plan.rows.length - 1 ? '' : 'disabled'} aria-label="Sposta giù">↓</button>
+          <button class="icon" data-album-act="remove" data-set="${esc(r.id)}" aria-label="Togli dall'album">✕</button>
+        </span>
+      </div>`).join('') || '<p class="note">Nessun set nell\'album: aggiungine uno qui sotto.</p>'}
+    </div>
+    <div class="settings">
+      <select id="albumAdd">
+        <optgroup label="Set di cui hai carte">${options(addable.filter(id => owned.has(id)).map(id => [id, setName(id)]))}</optgroup>
+        <optgroup label="Tutti gli altri set">${options(addable.filter(id => !owned.has(id)).map(id => [id, setName(id)]))}</optgroup>
+      </select>
+      <button class="chip" data-album-act="add">Aggiungi all'album</button>
+    </div>
+
+    ${cfg.sets.length ? `<h2>Pagine</h2>
+    <p class="note">Le carte nell'ordine del set, facciata per facciata. I posti vuoti sono le carte che ti
+      mancano: lasciali liberi e, quando le trovi, sai già dove vanno.</p>
+    <div class="settings"><select id="albumSet">${options(cfg.sets.map(id => [id, setName(id)]), albumSet)}</select></div>
+    <div id="albumPages"><p class="note">Caricamento…</p></div>` : ''}
 
     <h2>Protezione consigliata</h2>
     <p class="note">In base al valore della copia migliore e alla rarità. Il toploader (custodia rigida) va
@@ -568,20 +652,10 @@ async function album() {
       <label>Bustina da <input type="number" min="0" step="0.5" data-setting="slEuro" value="${protection.sleeve}"> €</label>
     </div>
 
-    <h2>Pagine dell'album</h2>
-    <p class="note">Le carte nell'ordine del set, pagina per pagina. I posti vuoti sono le carte che ti
-      mancano: lasciali liberi e, quando le trovi, sai già dove vanno.</p>
-    <div class="settings">
-      <select id="albumSet">${options(sets.map(id => [id, names.get(id)?.name ?? id]), albumSet)}</select>
-      <select id="albumPockets">${options([[4, '4 tasche (2×2)'], [9, '9 tasche (3×3)'], [12, '12 tasche (3×4)']], albumPockets)}</select>
-      <label><input type="checkbox" id="albumGaps" ${albumGaps ? 'checked' : ''}> Lascia i posti per le mancanti</label>
-    </div>
-    <div id="albumPages"><p class="note">Caricamento…</p></div>
-
     <h2>Set da completare</h2>
     ${toComplete.map(s => `<div class="setrow">
       <span class="logo">${names.has(s.id) ? setLogo(names.get(s.id)) : ''}</span>
-      <span class="info"><a href="#/set/${encodeURIComponent(s.id)}"><b>${esc(names.get(s.id)?.name ?? s.id)}</b></a>
+      <span class="info"><a href="#/set/${encodeURIComponent(s.id)}"><b>${esc(setName(s.id))}</b></a>
         ${bar(s.n, s.tot)}<small data-cost="${esc(s.id)}">${s.tot - s.n === 1 ? 'manca 1 carta' : `mancano ${s.tot - s.n} carte`}</small></span>
       <button class="chip" data-act="cost" data-set="${esc(s.id)}">Quanto costa?</button>
     </div>`).join('')}
@@ -590,23 +664,32 @@ async function album() {
     ${doubles.length ? group('Copie in più, da scambiare', doubles,
       ` · ${copiesOf(doubles) - doubles.length} in più`) : '<p class="note">Nessun doppione.</p>'}`;
 
-  renderAlbumPages();
+  renderAlbumPages(cfg, plan.rows.find(r => r.id === albumSet));
 }
 
-async function renderAlbumPages() {
+async function renderAlbumPages(cfg = albumConfig(), row) {
   const box = $('#albumPages');
   if (!box || !albumSet) return;
   let set;
   try { set = await getSet(albumSet); } catch (err) { box.innerHTML = failed(err); return; }
   for (const c of set.cards) briefs.set(c.id, { ...c, setId: set.id });
-  const cards = albumGaps ? set.cards : set.cards.filter(c => qty(coll.get(c.id)));
-  const cols = albumPockets === 4 ? 2 : 3;
-  const pages = [];
-  for (let i = 0; i < cards.length; i += albumPockets) pages.push(cards.slice(i, i + albumPockets));
-  box.innerHTML = pages.map((page, p) => `<div class="page">
-      <small>Pagina ${p + 1}${p % 2 ? ' (retro)' : ' (fronte)'} · ${page[0].localId}–${page.at(-1).localId}</small>
+  const cards = cfg.gaps ? set.cards : set.cards.filter(c => qty(coll.get(c.id)));
+  if (!cards.length) { box.innerHTML = '<p class="note">Nessuna carta di questo set da mettere nell\'album.</p>'; return; }
+  // Se il set non parte da inizio facciata, i primi posti sono del set precedente.
+  const lead = row ? row.start % cfg.perSide : 0;
+  const slots = [...Array(lead).fill(null), ...cards];
+  const firstSide = row?.fits ? row.firstSide : null;
+  const cols = cfg.perSide === 4 ? 2 : 3;
+  const sides = [];
+  for (let i = 0; i < slots.length; i += cfg.perSide) sides.push(slots.slice(i, i + cfg.perSide));
+  box.innerHTML = sides.map((side, p) => {
+    const own = side.filter(Boolean);
+    return `<div class="page">
+      <small>${firstSide ? sideLabel(firstSide + p) : `Facciata ${p + 1} del set (non entra nell'album)`}
+        · ${own[0].localId}–${own.at(-1).localId}</small>
       <div class="pockets" style="grid-template-columns:repeat(${cols},1fr)">
-        ${page.map(c => {
+        ${side.map(c => {
+          if (!c) return '<div class="pocket other"><span>set precedente</span></div>';
           const rec = coll.get(c.id);
           if (!qty(rec)) return `<div class="pocket empty" data-card="${esc(c.id)}"><b>${esc(c.localId)}</b><span>${esc(c.name)}</span></div>`;
           const tier = protectionOf(rec);
@@ -614,7 +697,8 @@ async function renderAlbumPages() {
             ${tier === 'toploader' ? '<i class="tag">TL</i>' : tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
         }).join('')}
       </div>
-    </div>`).join('') + `<p class="note">TL = va nel toploader (puoi lasciare il posto libero o un segnaposto) ·
+    </div>`;
+  }).join('') + `<p class="note">TL = va nel toploader (puoi lasciare il posto libero o un segnaposto) ·
       B = mettila nell'album dentro una bustina.</p>`;
 }
 
@@ -986,6 +1070,20 @@ view.addEventListener('click', async e => {
     for (const c of view.querySelectorAll('[data-filter]')) c.classList.toggle('on', c === filter);
     return renderGrid();
   }
+  const albumAct = e.target.closest('[data-album-act]');
+  if (albumAct) {
+    const cfg = albumConfig(), id = albumAct.dataset.set, i = cfg.sets.indexOf(id);
+    const move = (from, to) => cfg.sets.splice(to, 0, cfg.sets.splice(from, 1)[0]);
+    if (albumAct.dataset.albumAct === 'up' && i > 0) move(i, i - 1);
+    if (albumAct.dataset.albumAct === 'down' && i < cfg.sets.length - 1) move(i, i + 1);
+    if (albumAct.dataset.albumAct === 'remove') cfg.sets.splice(i, 1);
+    if (albumAct.dataset.albumAct === 'add' && $('#albumAdd').value) {
+      cfg.sets.push($('#albumAdd').value);
+      albumSet = $('#albumAdd').value;
+    }
+    saveAlbumConfig(cfg);
+    return album();
+  }
   const act = e.target.closest('[data-act]')?.dataset.act;
   const msg = $('#msg');
   if (act === 'prices') await refreshPrices(msg);
@@ -1033,9 +1131,14 @@ view.addEventListener('input', e => {
 view.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'file' && t.files[0]) importBackup(t.files[0], $('#msg'));
-  if (t.id === 'albumSet') { albumSet = t.value; renderAlbumPages(); }
-  if (t.id === 'albumPockets') { albumPockets = +t.value; renderAlbumPages(); }
-  if (t.id === 'albumGaps') { albumGaps = t.checked; renderAlbumPages(); }
+  if (t.id === 'albumSet') { albumSet = t.value; album(); }
+  if (t.dataset.album) {
+    const cfg = albumConfig(), key = t.dataset.album;
+    if (t.type === 'checkbox') cfg[key] = t.checked;
+    else if (+t.value > 0) cfg[key] = Math.round(+t.value);
+    saveAlbumConfig(cfg);
+    album();
+  }
   if (t.dataset.setting && +t.value >= 0) { meta.set(t.dataset.setting, +t.value); album(); }
 });
 

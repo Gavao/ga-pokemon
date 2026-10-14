@@ -282,6 +282,23 @@ button.warn { width: 100%; background: none; text-align: left; font: inherit; fo
 }
 .pocket .tag.sl { background: var(--accent); color: var(--accent-ink); }
 .setrow .chip { flex: none; font-size: 12px; padding: 5px 10px; }
+.albumsets .setrow { background: var(--panel); border: 0; border-radius: 12px; margin-bottom: 6px; padding: 8px 10px; }
+.albumsets .setrow.over { opacity: .6; }
+.setrow .info small { display: block; }
+.setrow .order { display: flex; gap: 4px; flex: none; }
+.setrow .order .icon { width: 32px; height: 32px; font-size: 14px; }
+.setrow .order .icon:disabled { opacity: .3; }
+.bad { color: var(--red); }
+.pocket.other {
+  display: grid;
+  place-content: center;
+  padding: 4px;
+  background: repeating-linear-gradient(45deg, var(--panel), var(--panel) 6px, var(--bg) 6px, var(--bg) 12px);
+  color: var(--muted);
+  font-size: 10px;
+  text-align: center;
+}
+#view > .bar { margin: -4px 0 12px; }
 .setrow .info a { color: inherit; }
 
 /* Altro */
