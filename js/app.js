@@ -507,6 +507,7 @@ async function stats() {
     ${recs.length && !paidCount ? `<p class="note">Indica il prezzo pagato nella scheda di una carta
       (campo "Pagata €") per vedere quanto hai speso e quanto ci guadagni.</p>` : ''}
     ${recs.length ? `<h2>Valore nel tempo</h2>${valueChart(valueLog)}` : ''}
+    ${recs.length ? goalsSection(names) : ''}
     ${packsSection()}
     ${dealsSection()}
     ${recs.length ? `<p class="note">Valori: prezzo medio di vendita su Cardmarket (trend) per una copia
@@ -889,6 +890,112 @@ async function completionCost(setId, label) {
   }));
   label.textContent = (missing.length === 1 ? 'manca 1 carta' : `mancano ${missing.length} carte`) + ` · circa ${eur(total)}`
     + (unpriced ? ` (${unpriced} senza prezzo)` : '');
+}
+
+// ---------------------------------------------------------------------------
+// Obiettivi (scelti da te) e traguardi (automatici). Obiettivi e traguardi raggiunti stanno nel
+// database e nel backup; quando se ne raggiunge uno nuovo compare un avviso.
+// ---------------------------------------------------------------------------
+let goals = [], earnedBadges = null;
+
+/** Numeri della collezione su cui si misurano obiettivi e traguardi. */
+function collectionFacts(names) {
+  const recs = [...coll.values()].filter(qty);
+  const owned = ownedBySet();
+  return {
+    cards: recs.length,
+    value: recs.reduce((a, r) => a + recValue(r), 0),
+    foil: recs.reduce((a, r) => a + r.copies.filter(c => c.variant !== 'normal').reduce((s, c) => s + c.qty, 0), 0),
+    sets: owned.size,
+    // Set completato: tutte le carte numerate (quelle "segrete" oltre il totale stampato non servono).
+    complete: [...owned].filter(([id, n]) => names.get(id) && n >= (names.get(id).cardCount.official || names.get(id).cardCount.total)).length,
+    maxCard: Math.max(0, ...recs.map(r => Math.max(...r.copies.map(c => unitPrice(r, c.variant))))),
+    packs: packs.length,
+    deals: deals.length,
+    charizard: recs.some(r => /charizard/i.test(r.name)) ? 1 : 0,
+  };
+}
+
+const BADGES = [
+  ...[10, 50, 100, 250, 500, 1000, 2500].map(n => ({ id: 'cards' + n, label: `${n} carte diverse`, of: f => f.cards, target: n })),
+  ...[25, 100, 250, 500, 1000, 5000].map(n => ({ id: 'value' + n, label: `Collezione da ${n} €`, of: f => f.value, target: n, money: true })),
+  ...[10, 50, 100, 250].map(n => ({ id: 'foil' + n, label: `${n} copie holo o reverse`, of: f => f.foil, target: n })),
+  ...[5, 10, 25, 50].map(n => ({ id: 'sets' + n, label: `Carte di ${n} set diversi`, of: f => f.sets, target: n })),
+  { id: 'complete1', label: 'Primo set completato', of: f => f.complete, target: 1 },
+  { id: 'complete5', label: '5 set completati', of: f => f.complete, target: 5 },
+  { id: 'big50', label: 'Una carta da 50 € o più', of: f => f.maxCard, target: 50, money: true },
+  { id: 'big200', label: 'Una carta da 200 € o più', of: f => f.maxCard, target: 200, money: true },
+  ...[1, 10, 50, 100].map(n => ({ id: 'packs' + n, label: n === 1 ? 'Prima bustina registrata' : `${n} bustine aperte`, of: f => f.packs, target: n })),
+  { id: 'charizard', label: 'Un Charizard in collezione', of: f => f.charizard, target: 1 },
+  { id: 'deal1', label: 'Primo scambio o vendita', of: f => f.deals, target: 1 },
+];
+
+async function catalogNames() {
+  const names = new Map();
+  try { for (const serie of await getCatalog()) for (const s of serie.sets) names.set(s.id, s); } catch { /* offline */ }
+  return names;
+}
+
+/** Controlla i traguardi dopo le modifiche: i nuovi si annunciano (la prima volta si registrano in silenzio). */
+async function checkBadges() {
+  const facts = collectionFacts(await catalogNames());
+  const now = BADGES.filter(b => b.of(facts) >= b.target).map(b => b.id);
+  if (earnedBadges === null) {
+    earnedBadges = now;
+  } else {
+    const fresh = now.filter(id => !earnedBadges.includes(id));
+    if (!fresh.length) return;
+    earnedBadges = [...earnedBadges, ...fresh];
+    toast(`Traguardo raggiunto: <b>${esc(BADGES.find(b => b.id === fresh.at(-1)).label)}</b>`);
+  }
+  await db.put('settings', { key: 'badges', value: earnedBadges });
+}
+
+const goalLabel = (g, names) => g.kind === 'set' ? `Completa ${names.get(g.setId)?.name ?? g.setId}`
+  : g.kind === 'cards' ? `Arriva a ${g.target} carte diverse` : `Collezione da ${eur(g.target)}`;
+
+function goalProgress(g, names, facts) {
+  if (g.kind === 'set') {
+    const tot = names.get(g.setId)?.cardCount.official || names.get(g.setId)?.cardCount.total || 0;
+    return [ownedBySet().get(g.setId) ?? 0, tot];
+  }
+  return [g.kind === 'cards' ? facts.cards : facts.value, g.target];
+}
+
+async function saveGoals() {
+  meta.set('dirty', meta.get('dirty') + 1);
+  await db.put('settings', { key: 'goals', value: goals });
+  autoBackup();
+}
+
+function goalsSection(names) {
+  const facts = collectionFacts(names);
+  const earned = BADGES.filter(b => b.of(facts) >= b.target);
+  // Prossimi traguardi: per ogni famiglia il primo non ancora raggiunto, dal più vicino.
+  const next = Object.values(BADGES.filter(b => b.of(facts) < b.target)
+    .reduce((acc, b) => { const fam = b.id.replace(/\d+$/, ''); acc[fam] ??= b; return acc; }, {}))
+    .sort((a, b) => b.of(facts) / b.target - a.of(facts) / a.target).slice(0, 4);
+  const amount = (b, v) => b.money ? eur(v) : Math.floor(v);
+  return `<h2>Obiettivi</h2>
+    ${goals.map(g => {
+      const [n, tot] = goalProgress(g, names, facts);
+      const done = tot && n >= tot;
+      return `<div class="goal ${done ? 'done' : ''}"><span class="info"><b>${esc(goalLabel(g, names))}${done ? ' ✓' : ''}</b>
+        ${bar(n, tot)}<small>${g.kind === 'value' ? `${eur(n)} su ${eur(tot)}` : `${Math.floor(n)} su ${tot}`}</small></span>
+        <button class="icon" data-goal-del="${g.id}" aria-label="Elimina obiettivo">✕</button></div>`;
+    }).join('') || '<p class="note">Nessun obiettivo: aggiungine uno qui sotto.</p>'}
+    <div class="settings">
+      <select id="goalKind">${options([['set', 'Completa un set'], ['cards', 'Numero di carte'], ['value', 'Valore collezione (€)']], 'set')}</select>
+      <select id="goalSet">${options([...ownedBySet().keys()].map(id => [id, names.get(id)?.name ?? id]))}</select>
+      <input id="goalTarget" type="number" min="1" placeholder="Quante / quanti €" hidden>
+      <button class="chip" data-act="addGoal">Aggiungi obiettivo</button>
+    </div>
+    <h2>Traguardi <span class="count">${earned.length}/${BADGES.length}</span></h2>
+    <div class="badges">
+      ${earned.map(b => `<span class="badge-on">${esc(b.label)}</span>`).join('')}
+    </div>
+    ${next.map(b => `<div class="goal"><span class="info"><b>${esc(b.label)}</b>${bar(b.of(facts), b.target)}
+      <small>${amount(b, b.of(facts))} su ${amount(b, b.target)}</small></span></div>`).join('')}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1571,6 +1678,7 @@ function recordValue() {
     if (last?.d === d) Object.assign(last, { v, n });
     else valueLog.push({ d, v, n });
     await db.put('settings', { key: 'valueLog', value: valueLog });
+    await checkBadges();
   }, 2000);
 }
 
@@ -1626,7 +1734,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -1690,6 +1798,10 @@ async function importBackup(file, msg) {
       deals = data.deals;
       await db.put('settings', { key: 'deals', value: deals });
     }
+    if (Array.isArray(data.goals) && data.goals.length > goals.length) {
+      goals = data.goals;
+      await db.put('settings', { key: 'goals', value: goals });
+    }
     if (Array.isArray(data.packs) && data.packs.length > packs.length) {
       packs = data.packs;
       await db.put('settings', { key: 'packs', value: packs });
@@ -1713,6 +1825,12 @@ view.addEventListener('click', async e => {
     setFilter = filter.dataset.filter;
     for (const c of view.querySelectorAll('[data-filter]')) c.classList.toggle('on', c === filter);
     return renderGrid();
+  }
+  const goalDel = e.target.closest('[data-goal-del]');
+  if (goalDel) {
+    goals = goals.filter(g => g.id !== +goalDel.dataset.goalDel);
+    await saveGoals();
+    return stats();
   }
   const undo = e.target.closest('[data-undo-deal]');
   if (undo) {
@@ -1764,6 +1882,14 @@ view.addEventListener('click', async e => {
   if (act === 'prices') await refreshPrices(msg);
   if (act === 'scan') openScanner();
   if (act === 'shareDoubles') shareDoubles();
+  if (act === 'addGoal') {
+    const kind = $('#goalKind').value, target = Math.round(+$('#goalTarget').value);
+    if (kind === 'set' && $('#goalSet').value) goals.push({ id: Date.now(), kind, setId: $('#goalSet').value });
+    else if (kind !== 'set' && target > 0) goals.push({ id: Date.now(), kind, target });
+    else return toast('Indica un numero per l\'obiettivo.');
+    await saveGoals();
+    return stats();
+  }
   if (act === 'pack') openPackDialog();
   if (act === 'shareWish') shareWishlist();
   if (act === 'shopping' && curSet) shareMissing(curSet.id);
@@ -1811,6 +1937,10 @@ view.addEventListener('change', e => {
   const t = e.target;
   if (t.id === 'file' && t.files[0]) importBackup(t.files[0], $('#msg'));
   if (t.id === 'albumSet') { albumSet = t.value; album(); }
+  if (t.id === 'goalKind') {   // per "completa un set" si sceglie il set, per gli altri si scrive un numero
+    $('#goalSet').hidden = t.value !== 'set';
+    $('#goalTarget').hidden = t.value === 'set';
+  }
   if (t.dataset.album) {
     const cur = albums.find(a => a.id === currentAlbum) ?? albums[0], key = t.dataset.album;
     if (t.type === 'checkbox') cur[key] = t.checked;
@@ -1916,6 +2046,8 @@ albums = await loadAlbums();
 valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
 packs = (await db.get('settings', 'packs'))?.value ?? [];
+goals = (await db.get('settings', 'goals'))?.value ?? [];
+earnedBadges = (await db.get('settings', 'badges'))?.value ?? null;
 openPack = (await db.get('settings', 'openPack'))?.value ?? null;
 renderPackbar();
 if (coll.size) recordValue();

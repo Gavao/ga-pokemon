@@ -390,6 +390,16 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
   border-radius: 8px;
 }
 
+/* Obiettivi e traguardi */
+.goal { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-bottom: 6px; background: var(--panel); border-radius: 12px; }
+.goal .info { flex: 1; min-width: 0; }
+.goal small { display: block; margin-top: 3px; }
+.goal.done b { color: #5fd38d; }
+.goal.done .bar i { background: #5fd38d; }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.badge-on { padding: 5px 10px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 12px; font-weight: 600; }
+.settings input[hidden], .settings select[hidden] { display: none; }
+
 /* Bustina aperta */
 #packbar {
   position: fixed;
