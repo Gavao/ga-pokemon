@@ -421,6 +421,17 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
   border-radius: 8px;
   color: var(--text);
 }
+.copy .where-copy { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.copy .where-copy select { flex: 1; }
+.copy .sleeve-copy { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.copy .sleeve-copy input { width: auto; }
+.rarities { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 12px 12px; font-size: 13px; }
+.box-row { padding: 10px 12px; margin-bottom: 8px; background: var(--panel); border-radius: 12px; }
+.box-head { display: flex; align-items: center; gap: 6px; }
+.box-head b { flex: 1; }
+.box-head .icon { width: 32px; height: 32px; font-size: 14px; }
+.box-row .settings { margin: 6px 0; }
+.box-row .chips { flex-wrap: wrap; }
 .album-head { display: flex; align-items: center; gap: 6px; margin-top: 18px; }
 .album-head h2 { flex: 1; margin: 0; }
 .album-head h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 4px; }

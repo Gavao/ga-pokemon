@@ -564,22 +564,56 @@ async function stats() {
 // ---------------------------------------------------------------------------
 // Album: come sistemare fisicamente le carte
 // ---------------------------------------------------------------------------
-// Soglie di protezione, modificabili dalla pagina e ricordate sul dispositivo.
-const protection = {
-  get toploader() { return meta.get('tlEuro') || 10; },
-  get sleeve() { return meta.get('slEuro') || 1; },
+// Regole di conservazione e scatole, nel database e nel backup:
+//  - auto: se spento l'app non assegna nulla da sola, propone e tu confermi;
+//  - soglie in euro e rarità che vanno sempre in bustina o nel toploader;
+//  - scatole con nome: ognuna contiene certi set, i doppioni, oppure "tutto il resto".
+const DEFAULT_STORAGE = {
+  auto: true, tl: 10, sl: 1,
+  tlRarities: RARITY_ORDER.slice(RARITY_ORDER.indexOf('Rara illustrazione speciale')),
+  slRarities: RARITY_ORDER.slice(RARITY_ORDER.indexOf('Rara illustrazione'), RARITY_ORDER.indexOf('Rara illustrazione speciale')),
+  boxes: [],
 };
-// Rarità che meritano comunque la bustina / il toploader, a prescindere dal prezzo.
-const SLEEVE_RARITY = rarityRank('Rara illustrazione');
-const TOPLOADER_RARITY = rarityRank('Rara illustrazione speciale');
+let storage = structuredClone(DEFAULT_STORAGE);
+const protection = { get toploader() { return storage.tl; }, get sleeve() { return storage.sl; } };
 
-// Dove tenere una carta: in base alla copia di valore più alto e alla rarità.
-function protectionOf(rec) {
-  const best = Math.max(0, ...rec.copies.map(c => unitPrice(rec, c.variant)));
-  const rank = rarityRank(rec.rarity);
-  if (best >= protection.toploader || rank >= TOPLOADER_RARITY) return 'toploader';
-  if (best >= protection.sleeve || rank >= SLEEVE_RARITY) return 'sleeve';
+async function saveStorage() {
+  meta.set('dirty', meta.get('dirty') + 1);
+  invalidateLayouts();
+  await db.put('settings', { key: 'storage', value: storage });
+  autoBackup();
+}
+
+/** Protezione per una copia: in base al suo valore e alla rarità della carta. */
+function unitTier(rec, variant) {
+  const value = unitPrice(rec, variant);
+  if (value >= storage.tl || storage.tlRarities.includes(rec.rarity)) return 'toploader';
+  if (value >= storage.sl || storage.slRarities.includes(rec.rarity)) return 'sleeve';
   return 'album';
+}
+
+// Protezione della carta nel suo insieme (la copia più importante): per riepiloghi e tasche.
+function protectionOf(rec) {
+  const tiers = rec.copies.filter(c => c.qty > 0).map(c => unitTier(rec, c.variant));
+  return tiers.includes('toploader') ? 'toploader' : tiers.includes('sleeve') ? 'sleeve' : 'album';
+}
+
+// "Dove la tengo" scelto su una copia: 'album:<id>', 'box:<id>', 'toploader', 'slab'; vuoto = automatico.
+const WHERE_LABELS = { toploader: 'Toploader', slab: 'Gradata (slab)' };
+function whereOptions(rec) {
+  return [['', 'Automatico'],
+    ...albums.filter(a => !a.closed || a.sets?.includes(rec.setId) || a.cards?.some(e => e?.cardId === rec.cardId))
+      .map(a => [`album:${a.id}`, `Album: ${a.name}`]),
+    ...storage.boxes.map(b => [`box:${b.id}`, `Scatola: ${b.name}`]),
+    ['toploader', 'Toploader'], ['slab', 'Gradata (slab)']];
+}
+
+/** Scatola per una carta che non va in album: quella del suo set, poi quella dei doppioni, poi "tutto il resto". */
+function boxFor(rec, isDouble) {
+  const bySet = storage.boxes.find(b => b.sets?.includes(rec.setId));
+  const doubles = storage.boxes.find(b => b.doubles);
+  const rest = storage.boxes.find(b => b.rest);
+  return (isDouble ? doubles ?? bySet : bySet) ?? rest ?? null;
 }
 
 // Album fisici (calcolo delle posizioni in js/albums.js). Gli album stanno nel database e nel backup.
@@ -715,52 +749,123 @@ const placeText = (album, slot) => {
  * per variante). kind: 'slot' (posto nell'album), 'toploader', 'none' (set in nessun album), 'full'.
  * key identifica il posto: se cambia (album riordinato, copia migliore…) la carta torna da sistemare.
  */
+/**
+ * Dove va fisicamente ogni copia di una carta: un elemento per copia, con
+ * kind 'slot' (tasca di un album), 'toploader', 'slab', 'box' (scatola), 'none' (nessun posto adatto)
+ * o 'suggest' (automatico spento: solo una proposta, in "where", da confermare).
+ * Prima valgono le scelte fatte sulla copia ("Dove la tengo"), poi le regole, a partire dalla copia
+ * più bella: toploader, album libero, Pokédex, album del set; tutto il resto va in scatola.
+ * key identifica il posto: se cambia (album riordinato, nuova copia migliore…) la copia torna da sistemare.
+ */
 async function placementsOf(rec) {
   if (!qty(rec)) return [];
   await ensureAlbumInit();
-  if (protectionOf(rec) === 'toploader') return [{ kind: 'toploader', key: 'tl', text: 'Nel toploader, fuori dall\'album' }];
+  const units = rec.copies.flatMap((c, ci) => Array.from({ length: c.qty }, () => ({ c, ci, v: c.variant })));
+  const manual = units.filter(u => u.c.where), auto = units.filter(u => !u.c.where)
+    .sort((a, b) => unitPrice(rec, b.v) - unitPrice(rec, a.v) || (BEAUTY[b.v] ?? 0) - (BEAUTY[a.v] ?? 0));
+  const used = new Set();   // posti già occupati da un'altra copia di questa carta
+  const count = { tl: 0, slab: 0, box: 0 };
+  const sleeveNote = u => (u.c.sleeve || unitTier(rec, u.v) === 'sleeve' ? ' · in bustina' : '');
+  const variantNote = u => (new Set(units.map(x => x.v)).size > 1 ? ` · la ${VARIANTS[u.v] ?? u.v}` : '');
 
-  // Le copie si distribuiscono in quest'ordine: album libero (scelta tua), Pokédex, album del set.
-  // Con una copia sola conta solo il primo posto; nell'album del set il suo posto resta segnato.
-  const special = [];
-  const free = freeAlbumOf(rec.cardId);
-  if (free) {
-    const slot = free.cards.findIndex(e => e?.cardId === rec.cardId);
-    special.push({ kind: 'slot', key: `${free.id}:${slot}:free`, album: free, slot, manual: true, text: placeText(free, slot) });
-  }
-  const dex = dexAlbum();
-  const dexNum = dex && dexChoices(dex).byCard.get(rec.cardId);
-  if (dexNum && (await layoutFor(dex)).rows[0].fits) {
-    special.push({ kind: 'slot', key: `${dex.id}:${dexNum - dex.from}:dex`, album: dex, slot: dexNum - dex.from,
-      text: `${placeText(dex, dexNum - dex.from)} · ${dexLabel(dexNum)}` });
-  }
-  if (special.length >= qty(rec)) return special.slice(0, qty(rec));
-  const withDex = list => [...special, ...list];
+  const toploader = () => ({ kind: 'toploader', key: count.tl++ ? `tl:${count.tl - 1}` : 'tl', text: 'Nel toploader, fuori dall\'album' });
+  const slab = () => ({ kind: 'slab', key: `slab:${count.slab++}`, text: 'Gradata (slab), fuori dall\'album' });
+  const box = (b, u) => (b
+    ? { kind: 'box', box: b, key: `box:${b.id}:${u.v}:${count.box++}`, text: `Scatola ${b.name} · ${setNames.get(rec.setId) ?? rec.setId}, n° ${rec.localId}${variantNote(u)}` }
+    : { kind: 'box', key: '', text: 'In scatola (nessuna scatola adatta: creane una in Album → Scatole)' });
 
-  const album = setAlbums().find(a => a.sets?.includes(rec.setId));
-  if (!album) return withDex([{ kind: 'none', key: '', text: 'Il suo set non è in nessun album' }]);
-  const row = (await layoutFor(album)).rows.find(r => r.setId === rec.setId);
-  if (!row || row.error) return withDex([{ kind: 'none', key: '', text: 'Posizione non disponibile: serve la connessione' }]);
-  if (!row.fits) return withDex([{ kind: 'full', key: '', text: `Non entra in ${album.name}: serve più spazio o un altro album` }]);
-  const owned = [...new Set(rec.copies.filter(c => c.qty > 0).map(c => c.variant))];
-  const variants = album.master ? owned : [bestCopy(rec).variant];
-  return withDex(variants.map(v => {
-    const i = row.slots.findIndex(s => s.card.id === rec.cardId && (!album.master || s.variant === v));
-    if (i < 0) return { kind: 'none', key: '', text: `${VARIANTS[v] ?? v}: nessun posto in questo album` };
+  // Tasca in un album per questa copia, se c'è e non è già presa da un'altra copia.
+  async function slotIn(album, u) {
+    if (album.kind === 'free') {
+      const slot = album.cards?.findIndex(e => e?.cardId === rec.cardId) ?? -1;
+      if (slot < 0 || used.has(`${album.id}:${slot}`)) return null;
+      used.add(`${album.id}:${slot}`);
+      return { kind: 'slot', key: `${album.id}:${slot}:free`, album, slot, text: placeText(album, slot) + sleeveNote(u) };
+    }
+    if (album.kind === 'dex') {
+      const n = dexChoices(album).byCard.get(rec.cardId);
+      if (!n || used.has(`${album.id}:${n}`) || !(await layoutFor(album)).rows[0].fits) return null;
+      used.add(`${album.id}:${n}`);
+      const slot = n - album.from;
+      return { kind: 'slot', key: `${album.id}:${slot}:dex`, album, slot, text: `${placeText(album, slot)} · ${dexLabel(n)}${sleeveNote(u)}` };
+    }
+    const row = album.sets?.includes(rec.setId) && (await layoutFor(album)).rows.find(r => r.setId === rec.setId);
+    if (!row || row.error || !row.fits) return null;
+    const i = row.slots.findIndex(s => s.card.id === rec.cardId && (!album.master || s.variant === u.v));
+    if (i < 0 || used.has(`${album.id}:${row.start + i}`)) return null;
+    used.add(`${album.id}:${row.start + i}`);
     const slot = row.start + i;
-    const which = album.master || owned.length > 1 ? ` · la ${VARIANTS[v] ?? v}` : '';
-    return { kind: 'slot', key: `${album.id}:${slot}:${v}`, album, slot, text: placeText(album, slot) + which };
-  }));
+    return { kind: 'slot', key: `${album.id}:${slot}:${u.v}`, album, slot, text: placeText(album, slot) + variantNote(u) + sleeveNote(u) };
+  }
+
+  const out = [];
+  for (const u of manual) {   // le tue scelte
+    const [kind, id] = u.c.where.split(':');
+    let p = null;
+    if (kind === 'toploader') p = toploader();
+    else if (kind === 'slab') p = slab();
+    else if (kind === 'box') p = box(storage.boxes.find(b => b.id === id), u);
+    else if (kind === 'album') {
+      const album = albums.find(a => a.id === id);
+      p = album && await slotIn(album, u);
+      p ??= { kind: 'none', key: '', text: album ? `Nessun posto libero per questa copia in ${album.name}` : 'Album non più esistente' };
+    }
+    out.push({ ...(p ?? { kind: 'none', key: '', text: 'Posto non valido' }), unit: u, manual: true });
+  }
+
+  const setAlbum = setAlbums().find(a => a.sets?.includes(rec.setId));
+  for (const u of auto) {   // le regole
+    let p = null;
+    if (unitTier(rec, u.v) === 'toploader') p = toploader();
+    else {
+      const free = freeAlbumOf(rec.cardId), dex = dexAlbum();
+      for (const album of [free, dex, setAlbum].filter(Boolean)) {
+        if ((p = await slotIn(album, u))) break;
+      }
+      if (!p) {
+        const inAlbum = out.some(x => x.kind === 'slot');
+        if (!inAlbum && !setAlbum) p = { ...box(boxFor(rec, false), u), note: 'Il suo set non è in nessun album' };
+        else p = box(boxFor(rec, inAlbum), u);
+      }
+    }
+    // Automatico spento: è solo una proposta, da confermare.
+    if (!storage.auto) {
+      const where = p.kind === 'slot' ? `album:${p.album.id}` : p.kind === 'toploader' ? 'toploader' : p.box ? `box:${p.box.id}` : '';
+      p = { kind: 'suggest', key: '', where, text: `Proposta: ${p.text}`, album: p.album };
+    }
+    out.push({ ...p, unit: u });
+  }
+  return out;
+}
+
+/** Le copie con lo stesso posto si mostrano una volta sola, con il numero di copie. */
+function groupPlaces(places) {
+  const groups = [];
+  for (const p of places) {
+    const g = groups.find(x => x.text === p.text);
+    if (g) g.n++;
+    else groups.push({ ...p, n: 1 });
+  }
+  return groups.map(g => ({ ...g, label: g.n > 1 ? `${g.text} (×${g.n})` : g.text }));
 }
 
 const isPlaced = (rec, p) => (rec.placed ?? []).includes(p.key);
 
-/** Carte con un posto (o un toploader) dove non risultano ancora sistemate, in ordine di album e posto. */
+// Ultimi posti calcolati per ogni carta: servono alle tasche degli album, che si disegnano subito.
+const placementCache = new Map();
+
+/**
+ * Copie che hanno un posto (tasca, toploader, scatola, slab) dove non risultano ancora sistemate, più
+ * le proposte da confermare quando l'automatico è spento. Copie con lo stesso posto = una riga.
+ */
 async function toPlace() {
   const items = [];
+  placementCache.clear();
   for (const rec of coll.values()) {
-    for (const p of await placementsOf(rec)) {
-      if ((p.kind === 'slot' || p.kind === 'toploader') && !isPlaced(rec, p)) items.push({ rec, p });
+    const places = await placementsOf(rec);
+    placementCache.set(rec.cardId, places);
+    for (const p of groupPlaces(places)) {
+      if (p.kind === 'suggest' || (p.key && !isPlaced(rec, p))) items.push({ rec, p });
     }
   }
   const albumIndex = p => (p.album ? albums.indexOf(p.album) : albums.length);
@@ -789,9 +894,9 @@ function toast(html) {
 }
 
 async function toastPlacement(rec) {
-  const p = (await placementsOf(rec))[0];
-  if (p) {
-    toast(`<b>${esc(rec.name)}</b><br>${esc(p.kind === 'slot' || p.kind === 'toploader' ? 'Dove va: ' + p.text : p.text)}
+  const groups = groupPlaces(await placementsOf(rec));
+  if (groups.length) {
+    toast(`<b>${esc(rec.name)}</b><br>Dove va: ${groups.slice(0, 2).map(g => esc(g.label)).join('<br>')}
       <button class="chip" data-toast-card="${esc(rec.cardId)}">Cambia</button>`);
   }
 }
@@ -847,14 +952,17 @@ async function album() {
   const homeless = [...owned.keys()].filter(id => !inAlbum.has(id));
   // Da sistemare: ogni album mostra solo le sue carte; i toploader hanno una lista a parte.
   const todoAll = await toPlace();
-  const todo = todoAll.filter(t => t.p.album?.id === cur.id);
-  const todoTl = todoAll.filter(t => t.p.kind === 'toploader');
-  const pendingIn = a => todoAll.filter(t => t.p.album?.id === a.id).length;
-  const todoRows = list => `<div class="todo">${list.slice(0, todoLimit).map(({ rec, p }) => `<div class="todo-row">
+  const suggested = todoAll.filter(t => t.p.kind === 'suggest');
+  const placeable = todoAll.filter(t => t.p.kind !== 'suggest');
+  const todo = placeable.filter(t => t.p.album?.id === cur.id);
+  const todoTl = placeable.filter(t => t.p.kind === 'toploader' || t.p.kind === 'slab');
+  const todoBoxes = storage.boxes.map(b => [b, placeable.filter(t => t.p.box?.id === b.id)]).filter(([, l]) => l.length);
+  const pendingIn = a => placeable.filter(t => t.p.album?.id === a.id).length;
+  const todoRows = (list, action = 'placed', label = 'Fatto') => `<div class="todo">${list.slice(0, todoLimit).map(({ rec, p }) => `<div class="todo-row">
         <div class="thumb" data-card="${esc(rec.cardId)}">${cardImg(rec.cardId, rec.image, 'low')}</div>
         <span class="info"><b>${esc(rec.name)}</b><small>${esc(setName(rec.setId))} · N° ${esc(rec.localId)}</small>
-          <small class="place">${esc(p.text)}</small></span>
-        <button class="chip" data-placed="${esc(rec.cardId)}">Fatto</button>
+          <small class="place">${esc(p.label ?? p.text)}</small></span>
+        <button class="chip" data-${action}="${esc(rec.cardId)}">${label}</button>
       </div>`).join('')}</div>
       ${list.length > todoLimit ? `<div class="settings"><button class="chip" data-album-act="more">Mostra tutte (${list.length})</button></div>` : ''}`;
 
@@ -881,6 +989,10 @@ async function album() {
       <div class="settings"><button class="chip" data-album-act="allPlaced">Segna tutte come sistemate</button></div>`
       : `<p class="note">In ${esc(cur.name)} è tutto al suo posto.</p>`}
     ${todoTl.length ? `<h2>Da mettere nel toploader <span class="count">${todoTl.length}</span></h2>${todoRows(todoTl)}` : ''}
+    ${todoBoxes.map(([b, list]) => `<h2>Da mettere in ${esc(b.name)} <span class="count">${list.length}</span></h2>${todoRows(list)}`).join('')}
+    ${suggested.length ? `<h2>Da decidere <span class="count">${suggested.length}</span></h2>
+      <p class="note">L'automatico è spento: per queste copie ti propongo un posto. Conferma, oppure apri la carta
+        e scegli tu "Dove la tengo".</p>${todoRows(suggested, 'confirm', 'Conferma')}` : ''}
     ${homeless.length ? `<p class="note warnline">Set di cui hai carte ma che non sono in nessun album:
       ${homeless.map(id => esc(setName(id))).join(', ')}. Aggiungili a un album qui sotto.</p>` : ''}
 
@@ -943,10 +1055,34 @@ async function album() {
     ${group(`Toploader + bustina`, tiers.toploader, ` · ${copiesOf(tiers.toploader)} toploader`)}
     ${group('Bustina (sleeve) nell\'album', tiers.sleeve, ` · ${plural(copiesOf(tiers.sleeve), 'bustina', 'bustine')}`)}
     ${group('Album, senza bustina', tiers.album)}
+
+    <h2>Regole</h2>
     <div class="settings">
-      <label>Toploader da <input type="number" min="1" step="1" data-setting="tlEuro" value="${protection.toploader}"> €</label>
-      <label>Bustina da <input type="number" min="0" step="0.5" data-setting="slEuro" value="${protection.sleeve}"> €</label>
+      <label><input type="checkbox" data-storage="auto" ${storage.auto ? 'checked' : ''}> Assegna i posti in automatico</label>
+      <label>Toploader da <input type="number" min="0" step="1" data-storage="tl" value="${storage.tl}"> €</label>
+      <label>Bustina da <input type="number" min="0" step="0.5" data-storage="sl" value="${storage.sl}"> €</label>
     </div>
+    <p class="note">${storage.auto ? 'Le copie senza una tua scelta vanno dove dicono le regole.'
+      : 'Automatico spento: per ogni copia ti propongo un posto e tu confermi (lista "Da decidere").'}
+      Una scelta fatta su una copia ("Dove la tengo" nella scheda della carta) vale sempre più delle regole.</p>
+    <details class="group"><summary><span>Rarità che vanno sempre nel toploader</span><small>${storage.tlRarities.length}</small></summary>
+      <div class="rarities">${RARITY_ORDER.map(r => `<label><input type="checkbox" data-rarity="tl" value="${esc(r)}" ${storage.tlRarities.includes(r) ? 'checked' : ''}> ${esc(rarityLabel(r))}</label>`).join('')}</div></details>
+    <details class="group"><summary><span>Rarità che vanno sempre in bustina</span><small>${storage.slRarities.length}</small></summary>
+      <div class="rarities">${RARITY_ORDER.map(r => `<label><input type="checkbox" data-rarity="sl" value="${esc(r)}" ${storage.slRarities.includes(r) ? 'checked' : ''}> ${esc(rarityLabel(r))}</label>`).join('')}</div></details>
+
+    <h2>Scatole</h2>
+    ${storage.boxes.map(b => `<div class="box-row">
+      <div class="box-head"><b>${esc(b.name)}</b>
+        <button class="icon" data-box-act="rename" data-box="${esc(b.id)}" aria-label="Rinomina">✎</button>
+        <button class="icon" data-box-act="delete" data-box="${esc(b.id)}" aria-label="Elimina">✕</button></div>
+      <div class="settings">
+        <label><input type="checkbox" data-box-flag="doubles" data-box="${esc(b.id)}" ${b.doubles ? 'checked' : ''}> Doppioni</label>
+        <label><input type="checkbox" data-box-flag="rest" data-box="${esc(b.id)}" ${b.rest ? 'checked' : ''}> Tutto il resto</label>
+      </div>
+      <div class="chips">${(b.sets ?? []).map(id => `<button class="chip" data-box-act="unset" data-box="${esc(b.id)}" data-set="${esc(id)}">${esc(setName(id))} ✕</button>`).join('')}</div>
+      <div class="settings"><select data-box-add="${esc(b.id)}"><option value="">Aggiungi un set…</option>${options(order.filter(id => !storage.boxes.some(x => x.sets?.includes(id))).map(id => [id, setName(id)]))}</select></div>
+    </div>`).join('') || '<p class="note">Nessuna scatola. Le carte fuori dagli album (doppioni, set che non metti in album) vanno in scatola: creane una e scegli cosa contiene.</p>'}
+    <div class="settings"><button class="chip" data-box-act="new">+ Nuova scatola</button></div>
 
     <h2>Set da completare</h2>
     ${toComplete.map(s => `<div class="setrow">
@@ -1003,27 +1139,24 @@ function albumPocket(album, s, freeLabel) {
   if (!s) return `<div class="pocket other"><span>${freeLabel}</span></div>`;
   if (s.dex !== undefined) return dexPocket(album, s);
   const rec = coll.get(s.card.id);
-  // Negli album dei set: se tutte le copie sono già in un album libero o nel Pokédex, qui il posto
-  // resta libero, segnato con il nome di dove si trova la carta.
-  if (rec && (!album.kind || album.kind === 'sets') && protectionOf(rec) !== 'toploader') {
-    const dex = dexAlbum(), free = freeAlbumOf(rec.cardId);
-    const away = [free?.name, dex && dexChoices(dex).byCard.has(rec.cardId) ? dex.name : null].filter(Boolean);
-    if (away.length && qty(rec) <= away.length) {
-      return `<div class="pocket tl dexmark" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>in ${esc(away[0])}</span></div>`;
-    }
-  }
   const tag = VARIANT_TAG[s.variant] ? `<i class="vtag">${VARIANT_TAG[s.variant]}</i>` : '';
   if (!ownsVariant(s.card.id, s.variant)) {
     return `<div class="pocket empty" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>${esc(s.card.name)}</span>${tag}</div>`;
   }
-  const tier = protectionOf(rec);
-  if (tier === 'toploader') {
-    return `<div class="pocket tl" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>nel toploader</span><i class="tag">TL</i></div>`;
+  // Quale copia sta in questa tasca, secondo il calcolo dei posti (placementsOf, fatto da toPlace).
+  const places = placementCache.get(rec.cardId) ?? [];
+  const here = places.find(p => p.kind === 'slot' && p.album?.id === album.id && p.slot === s.slot);
+  if (!here) {   // la carta c'è, ma nessuna copia va qui: il posto resta libero e si dice dov'è
+    const w = places.find(p => !['none', 'suggest'].includes(p.kind)) ?? places[0];
+    const label = !w ? '' : w.kind === 'toploader' ? 'nel toploader' : w.kind === 'slab' ? 'gradata'
+      : w.kind === 'box' ? `in ${w.box?.name ?? 'scatola'}` : w.kind === 'slot' ? `in ${w.album.name}`
+      : w.kind === 'suggest' ? 'da decidere' : '';
+    return `<div class="pocket tl dexmark" data-card="${esc(s.card.id)}"><b>${esc(s.card.localId)}</b><span>${esc(label)}</span>
+      ${w?.kind === 'toploader' ? '<i class="tag">TL</i>' : ''}</div>`;
   }
-  const variant = s.variant ?? bestCopy(rec).variant;
-  const todo = !(rec.placed ?? []).includes(`${album.id}:${s.slot}:${album.kind === 'free' ? 'free' : variant}`);
+  const todo = !isPlaced(rec, here);
   return `<div class="pocket ${todo ? 'todo' : ''}" data-card="${esc(s.card.id)}">${cardImg(s.card.id, s.card.image, 'low')}
-    ${tag}${tier === 'sleeve' ? '<i class="tag sl">B</i>' : ''}</div>`;
+    ${tag}${here.text.includes('in bustina') ? '<i class="tag sl">B</i>' : ''}</div>`;
 }
 
 /** Impostazioni dell'album libero: capienza, tasche e quante carte ci sono. */
@@ -1536,6 +1669,8 @@ function renderSheet() {
       <input data-f="grade" placeholder="Gradazione (es. PSA 10)" value="${esc(c.grade)}">
       <input data-f="paid" inputmode="decimal" placeholder="Pagata € (a copia)" value="${c.paid ?? ''}">
       <input data-f="note" class="wide" placeholder="Note" value="${esc(c.note)}">
+      <label class="where-copy">Dove la tengo <select data-f="where">${options(whereOptions(cur), c.where ?? '')}</select></label>
+      <label class="sleeve-copy"><input type="checkbox" data-f="sleeve" ${c.sleeve ? 'checked' : ''}> Bustina</label>
       ${dealFor === i ? '' : `<button class="chip deal" data-deal="${i}">Vendi, scambia o regala</button>`}
     </div>
     ${dealFor === i ? dealForm(c, i) : ''}`).join('')}
@@ -1824,7 +1959,7 @@ async function fillWhere() {
     ? `<div class="where-actions"><select id="freeTarget">${options(targets.map(a => [a.id, a.name]))}</select>
         <button class="chip" data-free-put>${inFree ? 'Sposta' : 'Metti'} qui</button></div>`
     : '';
-  el.innerHTML = `<b>Dove va</b> ${places.map(p => esc(p.text)).join('<br>')}
+  el.innerHTML = `<b>Dove va</b> ${groupPlaces(places).map(g => esc(g.label)).join('<br>')}
     ${pending ? '<button class="chip" data-mark-placed>Sistemata</button>' : places.some(p => p.key) ? '<small>✓ già sistemata</small>' : ''}
     ${manual}${put}`;
 }
@@ -1839,14 +1974,21 @@ sheet.addEventListener('click', async e => {
     await markPlaced(cur);
     return renderSheet();
   }
-  if (e.target.closest('[data-free-put]')) {
+  if (e.target.closest('[data-free-put]')) {   // la copia più bella va nell'album scelto
     const album = albums.find(a => a.id === $('#freeTarget').value);
+    const copy = cur.copies.filter(c => c.qty > 0).sort((a, b) => unitPrice(cur, b.variant) - unitPrice(cur, a.variant))[0];
+    for (const c of cur.copies) if (c.where?.startsWith('album:') && freeAlbums().some(a => c.where === `album:${a.id}`)) delete c.where;
+    copy.where = `album:${album.id}`;
+    await save(cur);
     await putInFree(album, cur);
     toast(`${esc(cur.name)} → ${esc(album.name)}`);
     return renderSheet();
   }
-  if (e.target.closest('[data-free-remove]')) {
-    await removeFromFree(cur.cardId);   // torna al posto deciso dalle regole
+  if (e.target.closest('[data-free-remove]')) {   // torna al posto deciso dalle regole
+    const inFree = freeAlbumOf(cur.cardId);
+    for (const c of cur.copies) if (c.where === `album:${inFree?.id}`) delete c.where;
+    await save(cur);
+    await removeFromFree(cur.cardId);
     return renderSheet();
   }
   const dexPick = e.target.closest('[data-dex-pick]');
@@ -1892,13 +2034,36 @@ sheet.addEventListener('change', async e => {
   }
   const f = e.target.dataset.f;
   if (!f || !cur) return;
+  const copy = cur.copies[+e.target.closest('.copy').dataset.i];
   const value = e.target.value.trim();
-  // Prezzo pagato: numero con virgola o punto; vuoto = non indicato.
-  cur.copies[+e.target.closest('.copy').dataset.i][f] = f === 'paid'
-    ? (value ? Math.max(0, parseFloat(value.replace(',', '.'))) || 0 : null)
-    : value;
+  if (f === 'sleeve') copy.sleeve = e.target.checked;
+  else if (f === 'where') {
+    const before = copy.where;
+    if (value) copy.where = value;
+    else delete copy.where;   // torna all'automatico
+    await save(cur);
+    await syncFreeAlbums(cur, before);
+    return renderSheet();
+  } else {
+    // Prezzo pagato: numero con virgola o punto; vuoto = non indicato.
+    copy[f] = f === 'paid' ? (value ? Math.max(0, parseFloat(value.replace(',', '.'))) || 0 : null) : value;
+  }
   await save(cur);
+  if (f === 'sleeve') fillWhere();
 });
+
+/**
+ * Gli album liberi tengono l'elenco delle loro carte: se una copia ora sceglie un album libero la carta
+ * ci entra (prima tasca libera); se nessuna copia lo sceglie più, ne esce e la tasca resta libera.
+ */
+async function syncFreeAlbums(rec, before) {
+  for (const a of freeAlbums()) {
+    const wanted = rec.copies.some(c => c.where === `album:${a.id}`);
+    const inside = a.cards?.some(e => e?.cardId === rec.cardId);
+    if (wanted && !inside) await putInFree(a, rec);
+    else if (!wanted && inside && before === `album:${a.id}`) await removeFromFree(rec.cardId);
+  }
+}
 
 // Alla chiusura si aggiorna solo la carta toccata, così la pagina sotto non salta in cima.
 // Collezione e Wishlist invece vanno ricalcolate per intero.
@@ -2192,7 +2357,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals, storage });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -2293,6 +2458,10 @@ async function importBackup(file, msg) {
       deals = data.deals;
       await db.put('settings', { key: 'deals', value: deals });
     }
+    if (data.storage?.boxes) {   // regole e scatole
+      storage = { ...structuredClone(DEFAULT_STORAGE), ...data.storage };
+      await db.put('settings', { key: 'storage', value: storage });
+    }
     if (Array.isArray(data.goals) && data.goals.length > goals.length) {
       goals = data.goals;
       await db.put('settings', { key: 'goals', value: goals });
@@ -2342,6 +2511,56 @@ view.addEventListener('click', async e => {
   if (placed) {
     placed.disabled = true;
     await markPlaced(coll.get(placed.dataset.placed));
+    return album();
+  }
+  const confirmBtn = e.target.closest('[data-confirm]');
+  if (confirmBtn) {   // automatico spento: la proposta diventa la tua scelta, copia per copia
+    confirmBtn.disabled = true;
+    const rec = structuredClone(coll.get(confirmBtn.dataset.confirm));
+    // Una riga con più copie può avere proposte diverse (es. una in album, due in scatola): si divide
+    // in una riga per proposta, così ogni copia tiene il suo posto.
+    const byRow = new Map();
+    for (const p of await placementsOf(rec)) {
+      if (p.kind !== 'suggest' || !p.where) continue;
+      const counts = byRow.get(p.unit.ci) ?? new Map();
+      counts.set(p.where, (counts.get(p.where) ?? 0) + 1);
+      byRow.set(p.unit.ci, counts);
+    }
+    rec.copies = rec.copies.flatMap((c, ci) => {
+      const counts = byRow.get(ci);
+      if (!counts || c.where) return [c];
+      const rows = [...counts].map(([where, n]) => ({ ...c, qty: n, where }));
+      const rest = c.qty - [...counts.values()].reduce((a, n) => a + n, 0);
+      return rest > 0 ? [...rows, { ...c, qty: rest }] : rows;
+    });
+    await save(rec);
+    return album();
+  }
+  const boxAct = e.target.closest('[data-box-act]');
+  if (boxAct) {
+    const what = boxAct.dataset.boxAct, box = storage.boxes.find(b => b.id === boxAct.dataset.box);
+    if (what === 'new') {
+      const name = prompt('Nome della scatola', `Scatola ${storage.boxes.length + 1}`)?.trim();
+      if (!name) return;
+      storage.boxes.push({ id: 'b' + Date.now(), name: name.slice(0, 30), sets: [], doubles: false, rest: !storage.boxes.some(b => b.rest) });
+    }
+    if (what === 'rename') {
+      const name = prompt('Nuovo nome della scatola', box.name)?.trim();
+      if (!name) return;
+      box.name = name.slice(0, 30);
+    }
+    if (what === 'unset') box.sets = box.sets.filter(id => id !== boxAct.dataset.set);
+    if (what === 'delete') {
+      if (!confirm(`Eliminare ${box.name}? Le copie che avevi messo lì tornano all'automatico.`)) return;
+      storage.boxes = storage.boxes.filter(b => b !== box);
+      for (const rec of coll.values()) {
+        if (!rec.copies.some(c => c.where === `box:${box.id}`)) continue;
+        const copy = structuredClone(rec);
+        for (const c of copy.copies) if (c.where === `box:${box.id}`) delete c.where;
+        await save(copy);
+      }
+    }
+    await saveStorage();
     return album();
   }
   const albumAct = e.target.closest('[data-album-act]');
@@ -2486,7 +2705,27 @@ view.addEventListener('change', e => {
     else if (+t.value > 0) cur[key] = Math.round(+t.value);
     persistAlbums().then(album);
   }
-  if (t.dataset.setting && +t.value >= 0) { meta.set(t.dataset.setting, +t.value); album(); }
+  if (t.dataset.storage) {   // regole: automatico e soglie in euro
+    const key = t.dataset.storage;
+    if (key === 'auto') storage.auto = t.checked;
+    else if (+t.value >= 0) storage[key] = +t.value;
+    saveStorage().then(album);
+  }
+  if (t.dataset.rarity) {
+    const list = t.dataset.rarity === 'tl' ? 'tlRarities' : 'slRarities';
+    storage[list] = t.checked ? [...storage[list], t.value] : storage[list].filter(r => r !== t.value);
+    saveStorage().then(album);
+  }
+  if (t.dataset.boxFlag) {   // una sola scatola per i doppioni e una per tutto il resto
+    for (const b of storage.boxes) if (t.checked && b.id !== t.dataset.box) b[t.dataset.boxFlag] = false;
+    storage.boxes.find(b => b.id === t.dataset.box)[t.dataset.boxFlag] = t.checked;
+    saveStorage().then(album);
+  }
+  if (t.dataset.boxAdd && t.value) {
+    const b = storage.boxes.find(x => x.id === t.dataset.boxAdd);
+    b.sets = [...(b.sets ?? []), t.value];
+    saveStorage().then(album);
+  }
 });
 
 // Loghi dei set non caricati: si riprova qualche volta, poi si nasconde l'icona di immagine rotta.
@@ -2586,6 +2825,10 @@ valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
 packs = (await db.get('settings', 'packs'))?.value ?? [];
 goals = (await db.get('settings', 'goals'))?.value ?? [];
+// Regole e scatole; la prima volta si riprendono le soglie che c'erano prima.
+storage = { ...structuredClone(DEFAULT_STORAGE), ...(await db.get('settings', 'storage'))?.value };
+if (meta.get('tlEuro') && !(await db.get('settings', 'storage'))) storage.tl = meta.get('tlEuro');
+if (meta.get('slEuro') && !(await db.get('settings', 'storage'))) storage.sl = meta.get('slEuro');
 offlineSets = (await db.get('settings', 'offlineSets'))?.value ?? [];
 earnedBadges = (await db.get('settings', 'badges'))?.value ?? null;
 openPack = (await db.get('settings', 'openPack'))?.value ?? null;
