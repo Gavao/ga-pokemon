@@ -381,6 +381,45 @@ h2 .count { margin-left: 6px; padding: 1px 8px; border-radius: 999px; background
 .up { color: #5fd38d; }
 .down { color: var(--red); }
 
+/* Bustina aperta */
+#packbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #2a2e3a;
+  border-top: 2px solid var(--accent);
+}
+#packbar[hidden] { display: none; }
+#packbar span { flex: 1; min-width: 0; }
+#packbar b, #packbar small { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#packbar .chip { flex: none; font-size: 12px; padding: 6px 10px; }
+body:has(#packbar:not([hidden])) #view { padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 76px); }
+#packDialog {
+  width: 100%;
+  max-width: 520px;
+  margin: auto auto 0;
+  padding: 14px 14px calc(env(safe-area-inset-bottom) + 18px);
+  border: 0;
+  border-radius: 18px 18px 0 0;
+  background: var(--bg);
+  color: var(--text);
+}
+#packDialog::backdrop { background: rgba(0, 0, 0, .65); }
+#packForm { display: grid; gap: 12px; margin-top: 14px; }
+#packForm label { display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+#packForm select, #packForm input {
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
 /* Vendite e scambi */
 .copy .chip.deal { grid-column: 1 / -1; justify-self: start; font-size: 12px; padding: 5px 10px; }
 .dealform {

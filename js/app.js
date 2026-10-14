@@ -302,6 +302,7 @@ async function home() {
   for (const serie of catalog) for (const s of serie.sets) setNames.set(s.id, s.name);
   const dirty = meta.get('dirty');
   view.innerHTML = `<header class="top"><h1>GA Pokémon</h1>
+      <button class="chip" data-act="pack">Bustina</button>
       <button class="chip on" data-act="scan">Scansiona</button></header>
     <div id="updateSlot">${updateBanner()}</div>
     ${!native && coll.size && dirty >= BACKUP_REMINDER
@@ -309,6 +310,7 @@ async function home() {
     <div class="tools"><input id="hq" type="search" placeholder="Cerca un set o una carta" value="${esc(homeQuery)}"></div>
     <div id="homeBody"></div>`;
   renderHome();
+  renderPackbar();   // ora i nomi dei set sono noti
 }
 
 // Senza testo: elenco delle serie. Con testo: set e carte trovati in tutte le espansioni.
@@ -504,6 +506,7 @@ async function stats() {
     ${recs.length && !paidCount ? `<p class="note">Indica il prezzo pagato nella scheda di una carta
       (campo "Pagata €") per vedere quanto hai speso e quanto ci guadagni.</p>` : ''}
     ${recs.length ? `<h2>Valore nel tempo</h2>${valueChart(valueLog)}` : ''}
+    ${packsSection()}
     ${dealsSection()}
     ${recs.length ? `<p class="note">Valori: prezzo medio di vendita su Cardmarket (trend) per una copia
       in buone condizioni. Sono indicativi: lingua, condizione e gradazione possono cambiarli molto.</p>`
@@ -1053,6 +1056,120 @@ function dealsSection() {
     </div>`).join('')}</div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Bustine aperte: mentre una bustina è "aperta", ogni carta aggiunta (scansione, +, scheda) le
+// viene associata. Alla fine resta nel registro (database e backup) con spesa e valore trovato.
+// ---------------------------------------------------------------------------
+let packs = [], openPack = null;
+// Carta "forte": ex/V e rarità superiori, oppure che vale almeno 2 €.
+const HIT_RARITY = rarityRank('Rara doppia');
+const isHit = c => rarityRank(c.rarity) >= HIT_RARITY || c.value >= 2;
+
+async function savePacks() {
+  meta.set('dirty', meta.get('dirty') + 1);
+  await db.put('settings', { key: 'packs', value: packs });
+  await db.put('settings', { key: 'openPack', value: openPack });
+  autoBackup();
+}
+
+async function openPackDialog() {
+  if (openPack) return toast('C\'è già una bustina aperta: tocca Fine nella barra in basso per chiuderla.');
+  let order = [];
+  try { order = (await getCatalog()).flatMap(s => s.sets); } catch { /* offline */ }
+  const recent = [...new Set(packs.map(p => p.setId))];
+  const pick = recent[0] ?? order[0]?.id;
+  $('#packSet').innerHTML = (recent.length ? `<optgroup label="Aperte di recente">${options(recent.map(id => [id, setNames.get(id) ?? id]), pick)}</optgroup>` : '')
+    + `<optgroup label="Tutti i set">${options(order.map(s => [s.id, s.name]), recent.length ? '' : pick)}</optgroup>`;
+  $('#packPrice').value = packs[0]?.price ?? '';
+  $('#packDialog').showModal();
+}
+
+$('#packForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const setId = $('#packSet').value;
+  const price = parseFloat($('#packPrice').value.replace(',', '.'));
+  openPack = { id: Date.now(), date: new Date().toISOString().slice(0, 10), setId, price: price >= 0 ? price : null, cards: [] };
+  $('#packDialog').close();
+  await savePacks();
+  renderPackbar();
+  location.hash = '#/set/' + encodeURIComponent(setId);   // si parte dal set della bustina
+});
+$('#packDialog').addEventListener('click', e => {
+  if (e.target === $('#packDialog') || e.target.closest('[data-close-pack]')) $('#packDialog').close();
+});
+
+/** Chiamata a ogni copia aggiunta: se c'è una bustina aperta, la carta finisce lì. */
+async function recordInPack(rec, variant) {
+  if (!openPack) return;
+  openPack.cards.push({ cardId: rec.cardId, name: rec.name, setId: rec.setId, localId: rec.localId,
+    image: rec.image, variant, rarity: rec.rarity, value: unitPrice(rec, variant) });
+  await savePacks();
+  renderPackbar();
+}
+
+function renderPackbar() {
+  const bar = $('#packbar');
+  bar.hidden = !openPack;
+  if (!openPack) return;
+  const value = openPack.cards.reduce((a, c) => a + c.value, 0);
+  bar.innerHTML = `<span><b>Bustina di ${esc(setNames.get(openPack.setId) ?? openPack.setId)}</b>
+      <small>${plural(openPack.cards.length, 'carta', 'carte')} · ${eur(value)}${openPack.price != null ? ` su ${eur(openPack.price)} spesi` : ''}</small></span>
+    ${openPack.cards.length ? '<button class="chip" data-pack-undo>Togli ultima</button>' : '<button class="chip" data-pack-cancel>Annulla</button>'}
+    <button class="chip on" data-pack-done>Fine</button>`;
+}
+
+$('#packbar').addEventListener('click', async e => {
+  if (e.target.closest('[data-pack-done]')) {
+    const p = openPack, value = p.cards.reduce((a, c) => a + c.value, 0);
+    if (p.cards.length) packs.unshift(p);
+    openPack = null;
+    await savePacks();
+    renderPackbar();
+    toast(p.cards.length ? `Bustina registrata: ${plural(p.cards.length, 'carta', 'carte')}, ${eur(value)}`
+      + (p.price != null ? ` (${value >= p.price ? '+' : '−'}${eur(Math.abs(value - p.price))} sul prezzo)` : '')
+      : 'Bustina vuota: non registrata.');
+    if (location.hash === '#/stats') stats();
+  }
+  if (e.target.closest('[data-pack-cancel]')) {
+    openPack = null;
+    await savePacks();
+    renderPackbar();
+  }
+  if (e.target.closest('[data-pack-undo]')) {   // ultima carta registrata per sbaglio: la si toglie anche dalla collezione
+    const last = openPack.cards.pop();
+    await savePacks();
+    await removeOne(last.cardId);
+    renderPackbar();
+  }
+});
+
+function packsSection() {
+  if (!packs.length) return '';
+  const spent = packs.reduce((a, p) => a + (p.price ?? 0), 0);
+  const pulled = packs.reduce((a, p) => a + p.cards.reduce((s, c) => s + c.value, 0), 0);
+  const hits = packs.flatMap(p => p.cards.filter(isHit));
+  const best = packs.flatMap(p => p.cards).sort((a, b) => b.value - a.value)[0];
+  const bySet = new Map();
+  for (const p of packs) {
+    const s = bySet.get(p.setId) ?? { n: 0, spent: 0, value: 0, hits: 0 };
+    s.n++;
+    s.spent += p.price ?? 0;
+    s.value += p.cards.reduce((a, c) => a + c.value, 0);
+    s.hits += p.cards.filter(isHit).length;
+    bySet.set(p.setId, s);
+  }
+  return `<h2>Bustine aperte</h2>
+    <div class="kpis">
+      <div><b>${packs.length}</b><small>Bustine · ${eur(spent)} spesi</small></div>
+      <div><b class="${pulled >= spent ? 'up' : 'down'}">${eur(pulled)}</b><small>Valore trovato</small></div>
+      <div><b>${hits.length ? `1 ogni ${(packs.length / hits.length).toFixed(1).replace('.', ',')}` : '—'}</b><small>Carte forti (ex, V e superiori, o da 2 € in su)</small></div>
+      <div><b>${best ? eur(best.value) : '—'}</b><small>Colpo migliore${best ? ': ' + esc(best.name) : ''}</small></div>
+    </div>
+    ${[...bySet].map(([id, s]) => `<div class="deal-row"><span class="info"><b>${esc(setNames.get(id) ?? id)}</b>
+      <small>${plural(s.n, 'bustina', 'bustine')} · ${eur(s.spent)} spesi · ${eur(s.value)} trovati
+        (${eur(s.value / s.n)} a bustina) · ${plural(s.hits, 'carta forte', 'carte forti')}</small></span></div>`).join('')}`;
+}
+
 // Prezzo indicativo di una carta (trend Cardmarket della versione normale, altrimenti foil).
 const cardPrice = d => {
   const cm = d?.pricing?.cardmarket;
@@ -1152,14 +1269,17 @@ sheet.addEventListener('click', async e => {
     await confirmDeal(+e.target.closest('.dealform').dataset.i);
     return renderSheet();
   }
+  let added = null;   // copia aggiunta, da registrare nella bustina aperta
   if (e.target.closest('[data-wish]')) cur.wish = !cur.wish;
-  else if (e.target.closest('[data-newcopy]')) cur.copies.push(newCopy(cur));
+  else if (e.target.closest('[data-newcopy]')) cur.copies.push(added = newCopy(cur));
   else if (e.target.closest('[data-step]')) {
-    const i = +e.target.closest('.copy').dataset.i;
-    cur.copies[i].qty += +e.target.closest('[data-step]').dataset.step;
+    const i = +e.target.closest('.copy').dataset.i, step = +e.target.closest('[data-step]').dataset.step;
+    cur.copies[i].qty += step;
+    if (step > 0) added = cur.copies[i];
   } else return;
   await save(cur);
   renderSheet();
+  if (added) await recordInPack(cur, added.variant);
 });
 
 sheet.addEventListener('change', async e => {
@@ -1363,6 +1483,7 @@ async function addCopy(id) {
   await save(rec);
   refreshCard(id);
   toastPlacement(rec);
+  await recordInPack(rec, rec.copies[0].variant);
 }
 
 async function refreshPrices(msg) {
@@ -1457,7 +1578,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -1520,6 +1641,10 @@ async function importBackup(file, msg) {
     if (Array.isArray(data.deals) && data.deals.length > deals.length) {
       deals = data.deals;
       await db.put('settings', { key: 'deals', value: deals });
+    }
+    if (Array.isArray(data.packs) && data.packs.length > packs.length) {
+      packs = data.packs;
+      await db.put('settings', { key: 'packs', value: packs });
     }
     invalidateLayouts();
     autoBackup();
@@ -1591,6 +1716,7 @@ view.addEventListener('click', async e => {
   if (act === 'prices') await refreshPrices(msg);
   if (act === 'scan') openScanner();
   if (act === 'shareDoubles') shareDoubles();
+  if (act === 'pack') openPackDialog();
   if (act === 'shareWish') shareWishlist();
   if (act === 'shopping' && curSet) shareMissing(curSet.id);
   if (act === 'cost') {
@@ -1741,6 +1867,9 @@ for (const rec of await db.all('cards')) coll.set(rec.cardId, rec);
 albums = await loadAlbums();
 valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
+packs = (await db.get('settings', 'packs'))?.value ?? [];
+openPack = (await db.get('settings', 'openPack'))?.value ?? null;
+renderPackbar();
 if (coll.size) recordValue();
 if (coll.size && Date.now() - meta.get('pricesAt') > PRICE_REFRESH_EVERY) {
   refreshPrices({ textContent: '' }).then(() => { if (location.hash === '#/stats') stats(); });

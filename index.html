@@ -23,6 +23,20 @@
 
   <dialog id="sheet"></dialog>
 
+  <div id="packbar" hidden></div>
+
+  <dialog id="packDialog">
+    <div class="sheet-head">
+      <div><h2>Apri una bustina</h2><small>Le carte che aggiungi finiscono in questa bustina finché non tocchi Fine</small></div>
+      <button class="icon" data-close-pack aria-label="Chiudi">✕</button>
+    </div>
+    <form id="packForm">
+      <label>Set della bustina <select id="packSet"></select></label>
+      <label>Prezzo pagato (€) <input id="packPrice" inputmode="decimal" placeholder="es. 5,50"></label>
+      <button class="primary">Inizia</button>
+    </form>
+  </dialog>
+
   <dialog id="scanner">
     <div class="sheet-head">
       <div><h2>Scansiona una carta</h2><small>Carta dritta dentro il riquadro, con buona luce</small></div>
