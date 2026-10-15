@@ -776,3 +776,22 @@ h2 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
 }
 
 .top .spacer { flex: 1; }
+
+/* Costi */
+a.primary { display: block; text-align: center; margin-top: 10px; }
+.kpis small { display: block; color: var(--muted); font-size: 12px; }
+.deal-row .icon { flex: none; width: 34px; height: 34px; background: var(--bg); font-size: 14px; }
+
+/* Guida alle rarità */
+.rar-where-box { background: var(--panel); border-radius: 12px; padding: 10px; margin: 8px 0 4px; color: var(--text); }
+.rar-where { display: block; width: 100%; max-width: 420px; height: auto; margin: 0 auto; }
+.group.rar summary { align-items: center; justify-content: flex-start; gap: 12px; padding: 10px 12px; }
+.rar-look { flex: none; width: 46px; height: 64px; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .5)); }
+.rar-head { display: grid; gap: 6px; justify-items: start; }
+.rar-sym { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: 6px; background: #e9e9ee; }
+.rar-sym.text { color: #16181d; font-size: 11px; font-weight: 700; letter-spacing: .02em; }
+.rar-text { margin: 0; padding: 0 14px 10px; font-size: 14px; }
+.rar-examples { padding: 0 10px 12px; }
+.rar-examples .chip { margin: 4px 4px 0; }
+.rar-grid { grid-template-columns: repeat(3, 1fr); padding: 0; }
+.rar-grid .tile img { filter: none; }   /* nella guida i colori servono a riconoscere la rarità */

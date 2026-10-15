@@ -1,5 +1,6 @@
 import { db } from './db.js';
-import { getCatalog, getSet, getCard, searchCards, getSetVariants, filterCards } from './api.js';
+import { getCatalog, getSet, getCard, searchCards, getSetVariants, filterCards, rarityCards } from './api.js';
+import { RARITY_GROUPS, RARITY_DEFS, RARITY_WHERE, raritySymbol, rarityLook } from './rarity.js';
 import { DEFAULT_ALBUM, loadAlbums, saveAlbums, albumLayout, spot, columns } from './albums.js';
 import { POKEDEX, GENERATIONS } from './pokedex.js';
 import { bars, lines, hbars } from './charts.js';
@@ -1424,17 +1425,21 @@ async function statisticsPage() {
   const months = lastMonths(12);
   const log = addsLog ?? [];
 
-  // Spesa per mese: carte (copie aggiunte × prezzo pagato) e bustine.
+  // Spesa per mese: carte (copie aggiunte × prezzo pagato), bustine e spese segnate nei Costi.
+  const manualIn = (m, group) => sumOf(expenses.filter(e => e.date && monthKey(e.date) === m && costGroup(e) === group));
   const cardSpend = months.map(m => log.filter(e => e.d !== 'prima' && monthKey(e.d) === m)
-    .reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0));
-  const packSpend = months.map(m => packs.filter(p => monthKey(p.date) === m).reduce((a, p) => a + (p.price ?? 0), 0));
+    .reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0) + manualIn(m, 'carte'));
+  const packSpend = months.map(m => packs.filter(p => monthKey(p.date) === m).reduce((a, p) => a + (p.price ?? 0), 0) + manualIn(m, 'bustine'));
+  const gearSpend = months.map(m => manualIn(m, 'gear'));
+  const costs = costTotals();
 
-  // Speso contro valore: speso cumulato (dalle carte di "prima" in poi) e valore a fine mese.
+  // Speso contro valore: speso cumulato (dalle carte di "prima" e dalle spese senza data in poi) e valore a fine mese.
   const spentBefore = log.filter(e => e.d === 'prima').reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0)
     + packs.filter(p => monthKey(p.date) < months[0]).reduce((a, p) => a + (p.price ?? 0), 0)
-    + log.filter(e => e.d !== 'prima' && monthKey(e.d) < months[0]).reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0);
+    + log.filter(e => e.d !== 'prima' && monthKey(e.d) < months[0]).reduce((a, e) => a + e.n * paidOf(coll.get(e.id), e.v), 0)
+    + sumOf(expenses.filter(e => !e.date || monthKey(e.date) < months[0]));
   let run = spentBefore;
-  const spentCum = months.map((m, i) => (run += cardSpend[i] + packSpend[i]));
+  const spentCum = months.map((m, i) => (run += cardSpend[i] + packSpend[i] + gearSpend[i]));
   const valueAt = months.map(m => valueLog.filter(p => monthKey(p.d) <= m).at(-1)?.v ?? null);
 
   // Resa per set: speso (copie con prezzo + bustine di quel set) contro valore attuale.
@@ -1489,11 +1494,18 @@ async function statisticsPage() {
     <b class="${a.diff >= 0 ? 'up' : 'down'}">${a.diff >= 0 ? '+' : '−'}${eur(Math.abs(a.diff))}</b></div>`;
 
   view.innerHTML = `<header class="top"><h1>Statistiche</h1></header>
-    ${recs.length ? '' : '<p class="empty">Aggiungi qualche carta per vedere le statistiche.</p>'}
+    ${recs.length || expenses.length ? '' : '<p class="empty">Aggiungi qualche carta per vedere le statistiche.</p>'}
+
+    <h2>Costi</h2>
+    ${costKpis(costs)}
+    ${costs.total ? costBars(costs) : ''}
+    <a class="primary" href="#/costs">Aggiungi o vedi le spese (album, sleeve, toploader…)</a>
 
     <h2>Spesa per mese</h2>
-    ${bars({ labels, series: [{ name: 'Carte', color: C_CARDS, values: cardSpend }, { name: 'Bustine', color: C_PACKS, values: packSpend }], fmt: money })}
-    <p class="note">Le carte contano nel mese in cui le aggiungi, con il prezzo pagato che indichi nella loro scheda.</p>
+    ${bars({ labels, series: [{ name: 'Carte', color: C_CARDS, values: cardSpend }, { name: 'Bustine', color: C_PACKS, values: packSpend },
+      { name: 'Accessori e altro', color: C_GEAR, values: gearSpend }], fmt: money })}
+    <p class="note">Le carte contano nel mese in cui le aggiungi, con il prezzo pagato che indichi nella loro scheda.
+      Le spese segnate nei Costi contano nel loro mese (quelle senza data solo nel totale).</p>
 
     <h2>Speso contro valore</h2>
     ${lines({ labels, series: [{ name: 'Speso (totale)', color: C_PACKS, values: spentCum }, { name: 'Valore collezione', color: C_CARDS, values: valueAt }], fmt: money })}
@@ -1529,8 +1541,159 @@ async function statisticsPage() {
       + `<h3 class="subhead">Colpi migliori</h3>${bestPulls.map(c => `<div class="deal-row"><span class="info"><b>${esc(c.name)}</b>
         <small>${esc(names.get(c.setId)?.name ?? c.setId)} · ${shortDate(c.date)}</small></span><b>${eur(c.value)}</b></div>`).join('')}
       ${packsSection()}`
-      : '<p class="note">Nessuna bustina registrata: usa il pulsante "Bustina" quando ne apri una.</p>'}`;
+      : '<p class="note">Nessuna bustina registrata: apri il menu ☰ e tocca "Apri una bustina" quando ne apri una.</p>'}`;
 }
+
+// ---------------------------------------------------------------------------
+// Guida alle rarità: simbolo, disegno e spiegazione per ogni rarità; aprendo una voce arrivano
+// tre carte vere di quella rarità dal catalogo (toccandole si apre la scheda), con "Altri esempi".
+// ---------------------------------------------------------------------------
+function rarityGuide() {
+  view.innerHTML = `<header class="top"><h1>Guida alle rarità</h1></header>${RARITY_DEFS}
+    <p class="note">Quando trovi una carta, guarda il simbolo in basso e confrontalo con questa pagina.
+      Tocca una rarità per vedere esempi veri.</p>
+    <div class="rar-where-box">${RARITY_WHERE}</div>
+    ${RARITY_GROUPS.map(g => `<h2>${esc(g.title)}</h2><p class="note">${esc(g.note)}</p>
+      ${g.items.map(r => `<details class="group rar" data-rarity-guide="${esc(r.name)}" data-from="${esc(r.from)}">
+        <summary>${rarityLook(r.look)}<span class="rar-head"><b>${esc(r.label ?? rarityLabel(r.name))}</b>${raritySymbol(r.sym, r.badge)}</span></summary>
+        <p class="rar-text">${esc(r.text)}</p>
+        <div class="rar-examples"></div>
+      </details>`).join('')}`).join('')}
+    <h2>Non sono rarità: le versioni</h2>
+    <p class="note">Reverse (tutta la carta brilla tranne l'illustrazione), Holo e Prima Edizione sono versioni
+      della stessa carta, non rarità diverse: le scegli nella scheda della carta quando la aggiungi.</p>`;
+}
+
+const shuffle = list => list.map(x => [Math.random(), x]).sort((a, b) => a[0] - b[0]).map(([, x]) => x);
+
+async function loadRarityExamples(box) {
+  const out = box.querySelector('.rar-examples');
+  out.innerHTML = '<p class="note">Cerco gli esempi…</p>';
+  try {
+    const [list, names] = await Promise.all([rarityCards(box.dataset.rarityGuide, box.dataset.from), catalogNames()]);
+    const withImage = list.filter(c => c.image || IMAGES[c.id]);
+    const setOf = c => c.id.replace(/-[^-]+$/, '');
+    const pick = shuffle(withImage).slice(0, 3).map(c => ({ ...c, setId: setOf(c) }));
+    for (const c of pick) briefs.set(c.id, c);   // per aprirne la scheda o aggiungerla con +
+    const sets = [...new Set(list.map(setOf))].map(id => names.get(id)?.name).filter(Boolean);
+    out.innerHTML = pick.length
+      ? `<div class="grid rar-grid">${pick.map(c => `<div class="result">${tile(c)}<small>${esc(names.get(c.setId)?.name ?? c.setId)}</small></div>`).join('')}</div>
+        <p class="note">${list.length > 3 ? `${plural(list.length, 'carta', 'carte')} di questa rarità` : ''}${sets.length ? ` · per esempio in ${esc(sets.slice(0, 4).join(', '))}${sets.length > 4 ? ` e altre ${sets.length - 4} espansioni` : ''}` : ''}</p>
+        ${withImage.length > 3 ? '<button class="chip" data-more-examples>Altri esempi</button>' : ''}`
+      : '<p class="note">Nessun esempio con immagine nel catalogo.</p>';
+  } catch {
+    out.innerHTML = '<p class="note">Esempi non disponibili senza connessione.</p>';
+  }
+}
+
+view.addEventListener('toggle', e => {
+  if (e.target.dataset?.rarityGuide && e.target.open && !e.target.dataset.loaded) {
+    e.target.dataset.loaded = '1';
+    loadRarityExamples(e.target);
+  }
+}, true);
+view.addEventListener('click', e => {
+  const more = e.target.closest('[data-more-examples]');
+  if (more) loadRarityExamples(more.closest('[data-rarity-guide]'));
+});
+
+// ---------------------------------------------------------------------------
+// Costi: le spese segnate a mano (accessori, ma anche carte e bustine comprate prima di usare l'app),
+// sommate a quelle che l'app conosce già: prezzo pagato delle carte e bustine registrate.
+// Spesa: { id, date: 'AAAA-MM-GG' oppure '' se non la ricordi, cat, desc, amount }.
+// ---------------------------------------------------------------------------
+const COST_CATS = [
+  ['carte', 'Carte singole'], ['bustine', 'Bustine, box e confezioni'], ['album', 'Album e raccoglitori'],
+  ['sleeve', 'Bustine protettive (sleeve)'], ['toploader', 'Toploader e card saver'],
+  ['scatole', 'Scatole e porta mazzi'], ['gradazione', 'Gradazione (PSA, CGC…)'], ['spedizioni', 'Spedizioni'], ['altro', 'Altro'],
+];
+const costCat = id => COST_CATS.find(([k]) => k === id)?.[1] ?? 'Altro';
+const C_GEAR = '#f0569a';   // terzo colore dei grafici: si distingue da giallo e blu anche per chi non vede i colori
+let expenses = [];
+
+const saveExpenses = () => db.put('settings', { key: 'expenses', value: expenses });
+const sumOf = list => list.reduce((a, e) => a + e.amount, 0);
+// Gruppo del grafico mensile: carte, bustine o accessori (tutto il resto).
+const costGroup = e => (e.cat === 'carte' ? 'carte' : e.cat === 'bustine' ? 'bustine' : 'gear');
+
+/** Totali per categoria: spese a mano più carte con prezzo pagato e bustine registrate. */
+function costTotals() {
+  const cardsPaid = [...coll.values()].reduce((a, r) => a + r.copies.reduce((s, c) => s + (c.paid ?? 0) * c.qty, 0), 0);
+  const packsPaid = packs.reduce((a, p) => a + (p.price ?? 0), 0);
+  const byCat = COST_CATS.map(([k, label]) => {
+    const manual = sumOf(expenses.filter(e => e.cat === k));
+    const auto = k === 'carte' ? cardsPaid : k === 'bustine' ? packsPaid : 0;
+    return { id: k, label, value: manual + auto, manual, auto };
+  });
+  const total = byCat.reduce((a, c) => a + c.value, 0);
+  const gear = byCat.filter(c => c.id !== 'carte' && c.id !== 'bustine').reduce((a, c) => a + c.value, 0);
+  return { byCat, total, gear, cards: byCat[0].value, packs: byCat[1].value };
+}
+
+function costKpis(t) {
+  return `<div class="kpis">
+    <div><b>${eur(t.total)}</b><small>speso in tutto</small></div>
+    <div><b>${eur(t.cards)}</b><small>carte singole</small></div>
+    <div><b>${eur(t.packs)}</b><small>bustine e box</small></div>
+    <div><b>${eur(t.gear)}</b><small>accessori e altro</small></div></div>`;
+}
+
+const costBars = t => hbars(t.byCat.filter(c => c.value > 0).sort((a, b) => b.value - a.value), eur, C_GEAR);
+
+function costsPage() {
+  const t = costTotals();
+  const today = new Date().toISOString().slice(0, 10);
+  // Dalla più recente; quelle senza data in fondo.
+  const list = [...expenses].sort((a, b) => (b.date || '0').localeCompare(a.date || '0') || b.id - a.id);
+  const autoNote = [t.byCat[0].auto ? `${eur(t.byCat[0].auto)} di carte dal prezzo pagato nelle schede` : '',
+    t.byCat[1].auto ? `${eur(t.byCat[1].auto)} di bustine registrate` : ''].filter(Boolean);
+  view.innerHTML = `<header class="top"><a class="back" href="#/statistics" aria-label="Indietro">‹</a><h1>Costi</h1></header>
+    ${costKpis(t)}
+    ${autoNote.length ? `<p class="note">Comprende già ${autoNote.join(' e ')}: quelle non segnarle di nuovo qui.</p>` : ''}
+
+    <h2>Aggiungi una spesa</h2>
+    <form id="costForm" class="advform">
+      <select id="costCat">${options(COST_CATS, 'album')}</select>
+      <input id="costDesc" placeholder="Cosa (es. Album 9 tasche, 100 sleeve)" autocomplete="off">
+      <div class="advprice"><input id="costAmount" inputmode="decimal" placeholder="Prezzo €" required>
+        <input id="costDate" type="date" value="${today}" max="${today}"></div>
+      <button class="primary">Aggiungi</button>
+    </form>
+    <p class="note">Per le spese di prima: metti la data se te la ricordi, altrimenti cancellala e conta solo nel totale.</p>
+
+    ${t.total ? `<h2>Per categoria</h2>${costBars(t)}` : ''}
+
+    <h2>Spese segnate</h2>
+    ${list.map(e => `<div class="deal-row"><span class="info"><b>${esc(e.desc || costCat(e.cat))}</b>
+      <small>${esc(costCat(e.cat))} · ${e.date ? shortDate(e.date) : 'data non indicata'}</small></span>
+      <b>${eur(e.amount)}</b><button class="icon" data-del-expense="${e.id}" aria-label="Elimina la spesa">✕</button></div>`).join('')
+      || '<p class="note">Ancora nessuna spesa segnata.</p>'}`;
+}
+
+view.addEventListener('submit', async e => {
+  if (e.target.id !== 'costForm') return;
+  e.preventDefault();
+  const amount = parseFloat($('#costAmount').value.replace(',', '.'));
+  if (!(amount > 0)) return $('#costAmount').focus();
+  expenses.push({ id: Date.now(), date: $('#costDate').value, cat: $('#costCat').value, desc: $('#costDesc').value.trim(), amount });
+  await saveExpenses();
+  autoBackup();
+  const cat = $('#costCat').value;
+  costsPage();
+  $('#costCat').value = cat;   // spesso si segnano più cose della stessa categoria di fila
+  toast(`Spesa aggiunta: ${eur(amount)}`);
+});
+
+view.addEventListener('click', async e => {
+  const del = e.target.closest('[data-del-expense]');
+  if (!del) return;
+  const item = expenses.find(x => x.id === +del.dataset.delExpense);
+  if (!item || !confirm(`Eliminare "${item.desc || costCat(item.cat)}" (${eur(item.amount)})?`)) return;
+  expenses = expenses.filter(x => x !== item);
+  await saveExpenses();
+  autoBackup();
+  costsPage();
+});
 
 // ---------------------------------------------------------------------------
 // Menu laterale: tutte le funzioni dell'app, raggruppate in sezioni che si aprono e si chiudono.
@@ -1538,8 +1701,8 @@ async function statisticsPage() {
 // Voce: [etichetta, indirizzo '#/…'] oppure [etichetta, null, azione].
 // ---------------------------------------------------------------------------
 const MENU = [
-  ['◓', 'Catalogo', [['Espansioni', '#/'], ['Ricerca avanzata', '#/search'], ['Scansiona una carta', null, 'scan'], ['Wishlist', '#/wish']]],
-  ['▤', 'La mia collezione', [['Riepilogo', '#/stats'], ['Statistiche', '#/statistics'], ['Doppioni', '#/doubles']]],
+  ['◓', 'Catalogo', [['Espansioni', '#/'], ['Ricerca avanzata', '#/search'], ['Guida alle rarità', '#/rarity'], ['Scansiona una carta', null, 'scan'], ['Wishlist', '#/wish']]],
+  ['▤', 'La mia collezione', [['Riepilogo', '#/stats'], ['Statistiche', '#/statistics'], ['Costi e spese', '#/costs'], ['Doppioni', '#/doubles']]],
   ['▦', 'Album e conservazione', [['Album e scatole', '#/album'], ['Set da completare', '#/complete'], ['Sfoglia l\'album', null, 'flip']]],
   ['◈', 'Acquisti', [['Apri una bustina', null, 'pack'], ['Modalità fiera', '#/more']]],
   ['⚙', 'Impostazioni', [['Backup e ripristino', '#/more'], ['Aggiornamenti e manutenzione', '#/more']]],
@@ -2809,7 +2972,7 @@ view.addEventListener('pointermove', e => {
   svg.closest('.vchart').querySelector('.vchart-read').innerHTML = `<b>${value}</b> il ${date}`;
 });
 
-const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals, storage, setGoals });
+const backupJson = () => JSON.stringify({ app: 'pokecollezione', version: 2, cards: [...coll.values()], albums, valueLog, deals, packs, goals, storage, setGoals, expenses });
 const backupName = ext => `ga-pokemon-${new Date().toISOString().slice(0, 10)}.${ext}`;
 
 // File di backup che il telefono accetta di condividere con altre app (Drive, email, WhatsApp…),
@@ -2925,6 +3088,10 @@ async function importBackup(file, msg) {
     if (Array.isArray(data.packs) && data.packs.length > packs.length) {
       packs = data.packs;
       await db.put('settings', { key: 'packs', value: packs });
+    }
+    if (Array.isArray(data.expenses) && data.expenses.length > expenses.length) {   // spese segnate nei Costi
+      expenses = data.expenses;
+      await saveExpenses();
     }
     invalidateLayouts();
     autoBackup();
@@ -3246,7 +3413,7 @@ document.addEventListener('error', e => {
 // ---------------------------------------------------------------------------
 async function route() {
   const [page, arg] = location.hash.replace(/^#\/?/, '').split('/');
-  const tab = page === 'set' || page === 'search' ? 'home' : page === 'doubles' || page === 'statistics' ? 'stats' : page === 'complete' ? 'album' : page || 'home';
+  const tab = page === 'set' || page === 'search' || page === 'rarity' ? 'home' : page === 'doubles' || page === 'statistics' || page === 'costs' ? 'stats' : page === 'complete' ? 'album' : page || 'home';
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab);
   try {
     if (page === 'set') await setView(decodeURIComponent(arg));
@@ -3257,6 +3424,8 @@ async function route() {
     else if (page === 'doubles') await doublesPage();
     else if (page === 'complete') await completePage();
     else if (page === 'statistics') await statisticsPage();
+    else if (page === 'costs') costsPage();
+    else if (page === 'rarity') rarityGuide();
     else if (page === 'more') await more();
     else await home();
   } catch (err) {
@@ -3327,6 +3496,7 @@ albums = await loadAlbums();
 valueLog = (await db.get('settings', 'valueLog'))?.value ?? [];
 deals = (await db.get('settings', 'deals'))?.value ?? [];
 packs = (await db.get('settings', 'packs'))?.value ?? [];
+expenses = (await db.get('settings', 'expenses'))?.value ?? [];
 goals = (await db.get('settings', 'goals'))?.value ?? [];
 setGoals = (await db.get('settings', 'setGoals'))?.value ?? {};
 setAnalysis = (await db.get('settings', 'setAnalysis'))?.value ?? {};

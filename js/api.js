@@ -142,6 +142,14 @@ export function filterCards(filters) {
   return json('/cards?' + qs);
 }
 
+// Carte di una rarità, per gli esempi della guida alle rarità; from = testo che il codice carta deve
+// contenere (es. 'sv0' = solo Scarlatto e Violetto). L'elenco cambia di rado: si tiene per 30 giorni.
+export function rarityCards(rarity, from = '') {
+  const qs = new URLSearchParams({ rarity: 'eq:' + rarity, 'pagination:itemsPerPage': '250' });
+  if (from) qs.set('id', from);
+  return cached(`rarity:${rarity}:${from}`, () => json('/cards?' + qs), 30 * DAY);
+}
+
 // Dettaglio carta: rarità, varianti disponibili e prezzi. force = ignora la cache.
 // Se la carta non esiste in italiano si usa la scheda inglese.
 export function getCard(id, force = false) {
