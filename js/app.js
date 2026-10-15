@@ -7,7 +7,7 @@ import { bars, lines, hbars } from './charts.js';
 import { LOGOS } from './logos.js';
 import { IMAGES } from './images.js';
 import { APP_VERSION } from './version.js';
-import { captureFromVideo, canvasFromFile, readCard, findCards, parseNumber } from './scan.js';
+import { captureFromVideo, canvasFromFile, readCard, findCards, parseNumber, sharpness } from './scan.js';
 
 // ---------------------------------------------------------------------------
 // Personalizzazioni rapide: cambia queste liste per adattare l'app.
@@ -305,7 +305,7 @@ function setLogo(s) {
 }
 
 const bar = (n, tot) => `<div class="bar"><i style="width:${tot ? Math.min(100, n / tot * 100) : 0}%"></i></div>`;
-const loading = '<p class="empty">Caricamento…</p>';
+const loading = '<div class="loader"><span class="pokeball"></span><p>Caricamento…</p></div>';
 const failed = err => `<p class="empty">Impossibile caricare i dati.<br><small>${esc(err.message)}</small><br>
   Serve la connessione la prima volta che apri una pagina.</p>`;
 
@@ -2715,14 +2715,17 @@ async function openScanner() {
   burstLog = [];
   renderBurstLog();
   scanner.showModal();
+  scanner.classList.add('camwait');   // Poké Ball che oscilla finché la fotocamera non manda le prime immagini
   try {
     scanStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false,
     });
     scanVideo.srcObject = scanStream;
     await scanVideo.play();
-    scanner.classList.remove('nocam');
+    scanner.classList.remove('nocam', 'camwait');
+    await setupCameraTools().catch(() => {});   // senza flash e zoom si scatta lo stesso
   } catch {
+    scanner.classList.remove('camwait');
     scanner.classList.add('nocam');
     // Le versioni dell'APK prima della 1.2 non hanno il permesso per la fotocamera.
     $('#scanMsg').textContent = apkUpdate
@@ -2734,6 +2737,63 @@ async function openScanner() {
 function stopCamera() {
   scanStream?.getTracks().forEach(t => t.stop());
   scanStream = null;
+  camTrack = null;
+}
+
+// Strumenti della fotocamera, quando il telefono li offre: flash, zoom e messa a fuoco.
+// Lo zoom serve soprattutto a mettere a fuoco: da troppo vicino i telefoni non ci riescono, così
+// si tiene la carta a una ventina di centimetri e la si ingrandisce.
+const SCAN_HINT = 'Carta dritta dentro il riquadro, con buona luce';
+let camTrack = null, camCaps = {}, torchOn = false;
+const applyCam = settings => camTrack?.applyConstraints({ advanced: [settings] }).then(() => true, () => false);
+
+async function setupCameraTools() {
+  camTrack = scanStream.getVideoTracks()[0];
+  camCaps = camTrack.getCapabilities?.() ?? {};
+  torchOn = false;
+  const torch = scanner.querySelector('[data-torch]');
+  torch.hidden = !camCaps.torch;
+  torch.classList.remove('on');
+  torch.setAttribute('aria-pressed', 'false');
+  if (camCaps.focusMode?.includes('continuous')) await applyCam({ focusMode: 'continuous' });
+  const zoom = camCaps.zoom;
+  const steps = zoom ? [1, 1.5, 2, 3].filter(z => z >= zoom.min && z <= zoom.max) : [];
+  $('#camZoom').innerHTML = steps.length > 1
+    ? steps.map(z => `<button class="cam-btn" data-zoom="${z}">${String(z).replace('.', ',')}×</button>`).join('') : '';
+  if (steps.length > 1) {
+    await setZoom(steps.includes(2) ? 2 : steps.at(-1));
+    $('#scanHint').textContent = 'Tieni la carta a circa 20 cm: lo zoom la ingrandisce e così mette a fuoco';
+  } else {
+    $('#scanHint').textContent = SCAN_HINT;
+  }
+}
+
+async function setZoom(z) {
+  await applyCam({ zoom: z });
+  for (const b of $('#camZoom').children) b.classList.toggle('on', +b.dataset.zoom === z);
+}
+
+/** Messa a fuoco una volta (sul punto toccato, se si può), poi si torna a quella continua. */
+async function focusOnce(x = 0.5, y = 0.5) {
+  if (!camCaps.focusMode?.includes('single-shot')) return false;
+  if (camCaps.pointsOfInterest !== undefined) await applyCam({ pointsOfInterest: [{ x, y }] });
+  await applyCam({ focusMode: 'single-shot' });
+  await new Promise(r => setTimeout(r, 700));
+  if (camCaps.focusMode.includes('continuous')) applyCam({ focusMode: 'continuous' });
+  return true;
+}
+
+/** Scatto: alcuni fotogrammi in un attimo, e si tiene il più nitido (meno mosso e più a fuoco). */
+async function sharpestShot() {
+  await focusOnce();
+  let best = null;
+  for (let i = 0; i < 6; i++) {
+    const card = captureFromVideo(scanVideo, scanner.querySelector('.frame'));
+    const s = sharpness(card);
+    if (!best || s > best.s) best = { card, s };
+    await new Promise(r => setTimeout(r, 120));
+  }
+  return best;
 }
 
 function closeScanner() {
@@ -2742,19 +2802,25 @@ function closeScanner() {
 }
 
 let scanning = false, lastReading = null;
-async function recognize(card) {
+const BLURRY = 100;   // sotto questa nitidezza (vedi sharpness in scan.js) la foto è quasi sempre illeggibile
+async function recognize(card, blurry = false) {
   if (scanning) return;
   scanning = true;
+  scanner.classList.add('busy');
   const msg = $('#scanMsg');
   $('#scanResults').innerHTML = '';
   $('#scanFix').hidden = true;
   try {
     lastReading = await readCard(card, status => { msg.textContent = status; });
-    await showMatches(lastReading);
+    const found = await showMatches(lastReading);
+    if (blurry && !found) {
+      msg.textContent += ' La foto era sfocata: allontana un po’ il telefono (o usa lo zoom), tocca la carta sullo schermo per mettere a fuoco e riprova.';
+    }
   } catch (err) {
     msg.textContent = err.message;
   } finally {
     scanning = false;
+    scanner.classList.remove('busy');
   }
 }
 
@@ -2784,6 +2850,7 @@ async function showMatches(reading) {
     $('#scanFix').hidden = true;
     renderBurstLog();
   }
+  return found.length;
 }
 
 // Carte aggiunte in raffica in questa sessione, con la possibilità di toglierle se sbagliate.
@@ -2817,8 +2884,33 @@ $('#scanFix').addEventListener('submit', async e => {
 scanner.addEventListener('click', e => {
   if (e.target === scanner || e.target.closest('[data-close-scan]')) return closeScanner();
   if (e.target.closest('[data-shot]')) {
-    if (!scanStream) return $('#scanFile').click();
-    return recognize(captureFromVideo(scanVideo, scanner.querySelector('.frame')));
+    if (!scanStream) return $('#scanCamera').click();
+    if (scanning) return;
+    $('#scanMsg').textContent = 'Metto a fuoco…';
+    scanner.classList.add('busy');
+    sharpestShot().then(({ card, s }) => recognize(card, s < BLURRY));
+    return;
+  }
+  const torch = e.target.closest('[data-torch]');
+  if (torch) {
+    applyCam({ torch: !torchOn }).then(ok => {
+      if (!ok) return;
+      torchOn = !torchOn;
+      torch.classList.toggle('on', torchOn);
+      torch.setAttribute('aria-pressed', String(torchOn));
+    });
+    return;
+  }
+  const zoom = e.target.closest('[data-zoom]');
+  if (zoom) return setZoom(+zoom.dataset.zoom);
+  if (e.target === scanVideo || e.target.classList.contains('frame')) {   // tocco sull'immagine: mette a fuoco lì
+    const r = scanVideo.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    const ring = $('#camFocus');
+    Object.assign(ring.style, { left: `${x * 100}%`, top: `${y * 100}%` });
+    ring.hidden = false;
+    focusOnce(x, y).finally(() => setTimeout(() => { ring.hidden = true; }, 300));
+    return;
   }
   const undo = e.target.closest('[data-burst-undo]');
   if (undo) {
@@ -2834,7 +2926,7 @@ scanner.addEventListener('click', e => {
 
 scanner.addEventListener('change', async e => {
   const file = e.target.files?.[0];
-  if (e.target.id !== 'scanFile' || !file) return;
+  if ((e.target.id !== 'scanFile' && e.target.id !== 'scanCamera') || !file) return;
   e.target.value = '';
   recognize(await canvasFromFile(file));
 });

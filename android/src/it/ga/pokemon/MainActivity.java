@@ -50,9 +50,13 @@ public class MainActivity extends Activity {
     private static final String BACKUP_NAME = "ga-pokemon-backup.json";
     private static final int PICK_FILE = 1;
     private static final int CAMERA_PERMISSION = 2;
+    private static final int TAKE_PHOTO = 3;
+    private static final int PHOTO_PERMISSION = 4;
+    private static final String PHOTO_DIR = Environment.DIRECTORY_PICTURES + "/GAPokemon/";
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private Uri photoUri;   // dove l'app Fotocamera salva lo scatto in corso
     private PermissionRequest cameraRequest;   // richiesta della pagina in attesa del permesso Android
 
     @Override
@@ -104,11 +108,22 @@ public class MainActivity extends Activity {
                 });
             }
 
-            // <input type="file">: serve per "Ripristina da un backup".
+            // <input type="file">: serve per "Ripristina da un backup" e le foto delle carte.
+            // Con capture (pulsante "Fotocamera del telefono") si apre l'app Fotocamera vera,
+            // che ha messa a fuoco e flash migliori della fotocamera dentro la pagina.
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
+                if (params.isCaptureEnabled()) {
+                    // Android rifiuta l'app Fotocamera a chi dichiara il permesso CAMERA senza averlo ottenuto.
+                    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        takePhoto();
+                    } else {
+                        requestPermissions(new String[]{Manifest.permission.CAMERA}, PHOTO_PERMISSION);
+                    }
+                    return true;
+                }
                 Intent pick = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
                 try {
                     startActivityForResult(pick, PICK_FILE);
@@ -121,11 +136,49 @@ public class MainActivity extends Activity {
         });
 
         web.loadUrl(HOME);
+        deletePhotos();   // foto delle carte rimaste dall'ultima volta
+    }
+
+    /**
+     * Foto con l'app Fotocamera, salvata in Immagini/GAPokemon solo il tempo di leggerla: la foto
+     * precedente si cancella a ogni nuovo scatto e tutte all'apertura dell'app.
+     */
+    private void takePhoto() {
+        deletePhotos();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, "carta-" + System.currentTimeMillis() + ".jpg");
+        values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, PHOTO_DIR);
+        photoUri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        Intent shot = new Intent(MediaStore.ACTION_IMAGE_CAPTURE).putExtra(MediaStore.EXTRA_OUTPUT, photoUri)
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            if (photoUri == null) throw new IOException("Immagini non disponibili");
+            startActivityForResult(shot, TAKE_PHOTO);
+        } catch (Exception e) {
+            fileCallback.onReceiveValue(null);
+            fileCallback = null;
+        }
+    }
+
+    private void deletePhotos() {
+        try {
+            getContentResolver().delete(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?", new String[]{PHOTO_DIR + "%"});
+        } catch (Exception ignored) {
+            // niente da cancellare
+        }
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode != PICK_FILE || fileCallback == null) return;
+        if (fileCallback == null) return;
+        if (requestCode == TAKE_PHOTO) {
+            fileCallback.onReceiveValue(resultCode == RESULT_OK && photoUri != null ? new Uri[]{photoUri} : null);
+            fileCallback = null;
+            return;
+        }
+        if (requestCode != PICK_FILE) return;
         Uri picked = resultCode == RESULT_OK && data != null ? data.getData() : null;
         fileCallback.onReceiveValue(picked == null ? null : new Uri[]{picked});
         fileCallback = null;
@@ -133,6 +186,16 @@ public class MainActivity extends Activity {
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+        if (requestCode == PHOTO_PERMISSION && fileCallback != null) {
+            if (granted) {
+                takePhoto();
+            } else {
+                fileCallback.onReceiveValue(null);
+                fileCallback = null;
+            }
+            return;
+        }
         if (requestCode != CAMERA_PERMISSION || cameraRequest == null) return;
         if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
             cameraRequest.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});

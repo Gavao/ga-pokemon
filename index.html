@@ -44,16 +44,26 @@
 
   <dialog id="scanner">
     <div class="sheet-head">
-      <div><h2>Scansiona una carta</h2><small>Carta dritta dentro il riquadro, con buona luce</small></div>
+      <div><h2>Scansiona una carta</h2><small id="scanHint">Carta dritta dentro il riquadro, con buona luce</small></div>
       <button class="icon" data-close-scan aria-label="Chiudi">✕</button>
     </div>
     <div class="scan-view">
-      <video playsinline muted></video>
+      <!-- poster trasparente: senza, Android mostra un riquadro grigio con il tasto play finché la fotocamera non parte -->
+      <video playsinline muted poster="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></video>
+      <div class="cam-loading"><span class="pokeball"></span><small>Accendo la fotocamera…</small></div>
       <div class="frame"></div>
+      <div class="cam-tools">
+        <button class="cam-btn" data-torch hidden aria-pressed="false">Flash</button>
+        <span class="cam-zoom" id="camZoom"></span>
+      </div>
+      <span class="cam-focus" id="camFocus" hidden></span>
     </div>
     <div class="scan-actions">
       <button class="primary" data-shot>Scatta e riconosci</button>
-      <label class="chip">Usa una foto<input type="file" accept="image/*" id="scanFile" hidden></label>
+    </div>
+    <div class="scan-actions alt">
+      <label class="chip">Fotocamera del telefono<input type="file" accept="image/*" capture="environment" id="scanCamera" hidden></label>
+      <label class="chip">Dalla galleria<input type="file" accept="image/*" id="scanFile" hidden></label>
     </div>
     <label class="burst"><input type="checkbox" id="scanBurst"> Raffica: aggiungi da sola le carte riconosciute con sicurezza</label>
     <p class="note" id="scanMsg"></p>

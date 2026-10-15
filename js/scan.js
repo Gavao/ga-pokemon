@@ -40,6 +40,29 @@ export function captureFromVideo(video, frame) {
   return canvas;
 }
 
+/**
+ * Nitidezza della parte bassa della carta (dove c'è il numero): varianza del laplaciano sui grigi.
+ * Più è alta, più i bordi delle scritte sono netti; una foto mossa o sfocata dà valori bassi.
+ */
+export function sharpness(card) {
+  const y0 = Math.round(card.height * 0.82), h = card.height - y0, w = card.width;
+  const px = card.getContext('2d', { willReadFrequently: true }).getImageData(0, y0, w, h).data;
+  const gray = new Float32Array(w * h);
+  for (let i = 0; i < gray.length; i++) gray[i] = px[i * 4] * 0.3 + px[i * 4 + 1] * 0.59 + px[i * 4 + 2] * 0.11;
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const lap = gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w] - 4 * gray[i];
+      sum += lap;
+      sum2 += lap * lap;
+      n++;
+    }
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+
 /** Foto dalla galleria: si suppone che la carta riempia quasi tutta l'immagine. */
 export async function canvasFromFile(file) {
   const img = await createImageBitmap(file);

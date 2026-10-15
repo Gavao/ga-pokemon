@@ -795,3 +795,62 @@ a.primary { display: block; text-align: center; margin-top: 10px; }
 .rar-examples .chip { margin: 4px 4px 0; }
 .rar-grid { grid-template-columns: repeat(3, 1fr); padding: 0; }
 .rar-grid .tile img { filter: none; }   /* nella guida i colori servono a riconoscere la rarità */
+
+/* Poké Ball di caricamento: oscilla come durante una cattura, il pulsante al centro si illumina */
+.pokeball {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(#e3350d 0 45%, #16181d 45% 55%, #f4f4f6 55%);
+  box-shadow: inset 0 0 0 3px #16181d;
+  transform-origin: 50% 90%;
+  animation: pokeball-wobble 1.4s ease-in-out infinite;
+}
+.pokeball::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 32%;
+  height: 32%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #f4f4f6;
+  box-shadow: 0 0 0 3px #16181d;
+  animation: pokeball-glow 1.4s ease-in-out infinite;
+}
+@keyframes pokeball-wobble {
+  0%, 45%, 100% { transform: rotate(0); }
+  10% { transform: rotate(-20deg); }
+  22% { transform: rotate(16deg); }
+  34% { transform: rotate(-8deg); }
+}
+@keyframes pokeball-glow { 50%, 70% { background: #ffb4a3; } }
+@media (prefers-reduced-motion: reduce) { .pokeball, .pokeball::after { animation: none; } }
+.loader { display: grid; justify-items: center; gap: 4px; padding: 64px 0; color: var(--muted); }
+
+/* Fotocamera: attesa, flash, zoom, punto di messa a fuoco */
+.cam-loading { position: absolute; inset: 0; display: none; place-content: center; justify-items: center; gap: 12px; background: #000; color: #c9ced8; }
+#scanner.camwait .cam-loading { display: grid; }
+.cam-tools { position: absolute; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: center; gap: 6px; }
+.cam-zoom { display: flex; gap: 6px; margin-left: auto; }
+.cam-btn { padding: 7px 12px; border: 1px solid rgba(255, 255, 255, .35); border-radius: 18px; background: rgba(0, 0, 0, .55); color: #fff; font: inherit; font-size: 13px; }
+.cam-btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.cam-focus { position: absolute; width: 64px; height: 64px; border: 2px solid var(--accent); border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+.scan-actions.alt { margin-top: 8px; }
+.scan-actions.alt .chip { flex: 1; text-align: center; }
+#scanner.busy #scanMsg::before {
+  content: '';
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  vertical-align: -3px;
+  border-radius: 50%;
+  background: linear-gradient(#e3350d 0 42%, #16181d 42% 58%, #f4f4f6 58%);
+  box-shadow: inset 0 0 0 1.5px #16181d;
+  animation: pokeball-wobble 1.4s ease-in-out infinite;
+}
+.scan-actions.alt .chip { padding: 12px 8px; font-size: 13px; white-space: nowrap; }
